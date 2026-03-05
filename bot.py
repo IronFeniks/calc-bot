@@ -76,11 +76,14 @@ def load_from_yandex():
              'Фикс_производство': 200000, 'Выход_с_чертежа': 5, 'Категория': 'Сооружения'},
             {'Код': 'Мат001', 'Наименование': 'Болт М10', 'Тип': 'Материал', 
              'Фикс_производство': 0, 'Выход_с_чертежа': 1, 'Категория': 'Такелаж'},
+            {'Код': 'Мат002', 'Наименование': 'Гайка М10', 'Тип': 'Материал', 
+             'Фикс_производство': 0, 'Выход_с_чертежа': 1, 'Категория': 'Такелаж'},
         ]
         
         specifications = [
             {'Родитель_код': 'Изд001', 'Потомок_код': 'Изд002', 'Количество': 1},
             {'Родитель_код': 'Изд001', 'Потомок_код': 'Мат001', 'Количество': 4},
+            {'Родитель_код': 'Изд001', 'Потомок_код': 'Мат002', 'Количество': 4},
             {'Родитель_код': 'Изд002', 'Потомок_код': 'Мат001', 'Количество': 2},
         ]
         
@@ -111,6 +114,7 @@ def load_from_yandex():
     logger.error("❌ Загрузка не удалась, возвращаем пустые данные")
     logger.info("=" * 50)
     return {'nomenclature': [], 'specifications': []}
+
 # ==================== ПРОВЕРКА ДОСТУПА ====================
 async def check_access(update: Update) -> bool:
     """Проверяет, что сообщение из нужной группы и темы"""
@@ -193,9 +197,9 @@ def format_materials(materials):
     return result
 
 def format_money_block(data):
-    """Форматирование блока Деньги"""
-    result = f"💰 *ДЕНЬГИ*\n\n"
-    result += f"*ИТОГО за {data['qty']} шт:*\n"
+    """Форматирование блока Деньги (без Markdown)"""
+    result = f"💰 ДЕНЬГИ\n\n"
+    result += f"ИТОГО за {data['qty']} шт:\n"
     result += f"Материалы: {format_number(data['materialCost'])}₽\n"
     result += f"Производство: {format_number(data['prodCost'])}₽\n"
     result += f"Чертежи: {format_number(data['drawingCost'])}₽\n"
@@ -203,14 +207,14 @@ def format_money_block(data):
     result += f"Выручка: {format_number(data['revenue'])}₽\n"
     result += f"Прибыль до налога: {format_number(data['profitBeforeTax'])}₽\n"
     result += f"Налог ({data['taxRate']}%): {format_number(data['tax'])}₽\n"
-    result += f"*Прибыль после налога: {format_number(data['profitAfterTax'])}₽*\n"
+    result += f"Прибыль после налога: {format_number(data['profitAfterTax'])}₽\n"
     
     if data['qty'] > 0:
         per_unit_material = data['materialCost'] / data['qty']
         per_unit_total = data['totalCost'] / data['qty']
         per_unit_profit = data['profitAfterTax'] / data['qty']
         
-        result += f"\n*НА 1 ШТУКУ:*\n"
+        result += f"\nНА 1 ШТУКУ:\n"
         result += f"Материалы: {format_number(per_unit_material)}₽\n"
         result += f"Себестоимость: {format_number(per_unit_total)}₽\n"
         result += f"Прибыль: {format_number(per_unit_profit)}₽\n"
@@ -221,8 +225,13 @@ def format_money_block(data):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка команды /start"""
+    logger.info(f"📨 Получена команда /start от пользователя {update.effective_user.id}")
+    
     if not await check_access(update):
+        logger.warning("⛔ Доступ запрещен")
         return
+    
+    logger.info("✅ Доступ разрешен")
     
     user_id = update.effective_user.id
     if user_id in sessions:
@@ -254,10 +263,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
     
     await update.message.reply_text(
-        "👋 *Производственный калькулятор*\n\n"
+        "👋 Производственный калькулятор\n\n"
         "Выберите категорию для расчета:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -289,13 +297,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         
         await query.edit_message_text(
-            f"📊 *Параметры расчета*\n"
+            f"📊 Параметры расчета\n"
             f"Категория: {category}\n\n"
             f"Введите через пробел:\n"
-            f"*Эффективность (%) Налог (%)*\n\n"
-            f"Пример: `150 20`",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='Markdown'
+            f"Эффективность (%) Налог (%)\n\n"
+            f"Пример: 150 20",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return
     
@@ -316,10 +323,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
         
         await query.edit_message_text(
-            "👋 *Производственный калькулятор*\n\n"
+            "👋 Производственный калькулятор\n\n"
             "Выберите категорию:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='Markdown'
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return
 
@@ -343,9 +349,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts = text.split()
         if len(parts) < 2:
             await update.message.reply_text(
-                "❌ Введите через пробел: *Эффективность Налог*\n"
-                "Пример: `150 20`",
-                parse_mode='Markdown'
+                "❌ Введите через пробел: Эффективность Налог\n"
+                "Пример: 150 20"
             )
             return
         
@@ -377,9 +382,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Параметры сохранены:\n"
             f"Эффективность: {efficiency:.0f}%\n"
             f"Налог: {tax:.0f}%\n\n"
-            f"📋 *Доступные изделия:*\n{products_list}\n\n"
-            f"Введите название изделия или узла:",
-            parse_mode='Markdown'
+            f"📋 Доступные изделия:\n{products_list}\n\n"
+            f"Введите название изделия или узла:"
         )
         return
     
@@ -402,12 +406,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         output_per_drawing = product.get('Выход_с_чертежа', 1)
         
         await update.message.reply_text(
-            f"✅ Выбрано: *{product['Наименование']}*\n"
+            f"✅ Выбрано: {product['Наименование']}\n"
             f"Кратность: {output_per_drawing}\n\n"
             f"💰 Введите через пробел:\n"
-            f"*Рыночная цена Стоимость чертежа изделия*\n\n"
-            f"Пример: `3200000 6900000`",
-            parse_mode='Markdown'
+            f"Рыночная цена Стоимость чертежа изделия\n\n"
+            f"Пример: 3200000 6900000"
         )
         return
     
@@ -415,8 +418,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts = text.split()
         if len(parts) < 2:
             await update.message.reply_text(
-                "❌ Введите через пробел: *Рыночная цена Стоимость чертежа*\n"
-                "Пример: `3200000 6900000`"
+                "❌ Введите через пробел: Рыночная цена Стоимость чертежа\n"
+                "Пример: 3200000 6900000"
             )
             return
         
@@ -456,7 +459,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        drawings_needed = qty // output_per_drawing
+        drawings_needed = int(qty // output_per_drawing)
         
         data = load_from_yandex()
         materials_dict = collect_materials(
@@ -501,14 +504,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         money_text = format_money_block(result)
         
         await update.message.reply_text(
-            f"📊 *РЕЗУЛЬТАТЫ РАСЧЕТА*\n\n"
+            f"📊 РЕЗУЛЬТАТЫ РАСЧЕТА\n\n"
             f"Изделие: {product['Наименование']}\n"
             f"Количество: {qty:.0f} шт\n"
             f"Эффективность: {session['efficiency']:.0f}%\n"
             f"Налог: {session['tax']:.0f}%\n\n"
-            f"*Материалы:*\n{materials_text}\n"
-            f"{money_text}",
-            parse_mode='Markdown'
+            f"Материалы:\n{materials_text}\n"
+            f"{money_text}"
         )
         
         del sessions[user_id]
@@ -536,8 +538,6 @@ def main():
         
     except Exception as e:
         logger.exception(f"Критическая ошибка: {e}")
-        if __name__ == "__main__":
-    main()
 
 if __name__ == "__main__":
     main()
