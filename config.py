@@ -1,20 +1,14 @@
-import os
-from dotenv import load_dotenv
-
-# Загружаем переменные из .env файла
-load_dotenv()
+# config.py - без .env, все настройки здесь
 
 # Токен бота
-TOKEN = os.getenv('TOKEN')
-if not TOKEN:
-    raise ValueError("TOKEN не задан в .env файле")
+TOKEN = "8781867816:AAHTUiftksAirLCllqFoALgeCUAJ0nNEkP0"
 
 # ID группы и темы
-GROUP_ID = int(os.getenv('GROUP_ID', 0))
-TOPIC_ID = int(os.getenv('TOPIC_ID', 0))
+GROUP_ID = -1003300908374
+TOPIC_ID = 3830
 
 # Ссылка на Яндекс Таблицу
-YANDEX_TABLE_URL = os.getenv('YANDEX_TABLE_URL')
+YANDEX_TABLE_URL = "https://docs.yandex.ru/file/oX1mZgw-1NdaLg?format=csv"
 
 # Настройки кэширования
-CACHE_TTL = int(os.getenv('CACHE_TTL', 300))
+CACHE_TTL = 300
