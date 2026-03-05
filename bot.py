@@ -6,6 +6,8 @@ import requests
 from io import BytesIO
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+
+# Импортируем настройки из config.py
 from config import TOKEN, GROUP_ID, TOPIC_ID, YANDEX_TABLE_URL, CACHE_TTL
 
 # ==================== НАСТРОЙКА ЛОГИРОВАНИЯ ====================
@@ -35,7 +37,7 @@ def load_from_yandex():
         return {'nomenclature': [], 'specifications': []}
     
     try:
-        logger.info(f"Загрузка из Яндекс Таблицы...")
+        logger.info(f"Загрузка из Яндекс Таблицы: {YANDEX_TABLE_URL}")
         response = requests.get(YANDEX_TABLE_URL, timeout=30)
         
         if response.status_code != 200:
@@ -44,17 +46,25 @@ def load_from_yandex():
         
         # Читаем CSV
         df = pd.read_csv(BytesIO(response.content))
+        logger.info(f"CSV загружен, колонки: {list(df.columns)}")
         
         # ВРЕМЕННО: тестовые данные пока не настроим структуру CSV
         nomenclature = [
             {'Код': 'Изд001', 'Наименование': 'Балка', 'Тип': 'Изделие', 
              'Фикс_производство': 500000, 'Выход_с_чертежа': 10, 'Категория': 'Сооружения'},
+            {'Код': 'Изд002', 'Наименование': 'Каркас', 'Тип': 'Узел', 
+             'Фикс_производство': 200000, 'Выход_с_чертежа': 5, 'Категория': 'Сооружения'},
             {'Код': 'Мат001', 'Наименование': 'Болт М10', 'Тип': 'Материал', 
+             'Фикс_производство': 0, 'Выход_с_чертежа': 1, 'Категория': 'Такелаж'},
+            {'Код': 'Мат002', 'Наименование': 'Гайка М10', 'Тип': 'Материал', 
              'Фикс_производство': 0, 'Выход_с_чертежа': 1, 'Категория': 'Такелаж'},
         ]
         
         specifications = [
+            {'Родитель_код': 'Изд001', 'Потомок_код': 'Изд002', 'Количество': 1},
             {'Родитель_код': 'Изд001', 'Потомок_код': 'Мат001', 'Количество': 4},
+            {'Родитель_код': 'Изд001', 'Потомок_код': 'Мат002', 'Количество': 4},
+            {'Родитель_код': 'Изд002', 'Потомок_код': 'Мат001', 'Количество': 2},
         ]
         
         cached_data = {
@@ -63,8 +73,7 @@ def load_from_yandex():
         }
         last_update = current_time
         
-        logger.info(f"Загружено: {len(nomenclature)} записей номенклатуры, "
-                   f"{len(specifications)} спецификаций")
+        logger.info(f"Загружено: {len(nomenclature)} записей номенклатуры, {len(specifications)} спецификаций")
         return cached_data
         
     except Exception as e:
@@ -479,7 +488,7 @@ def main():
     """Точка входа для запуска бота"""
     try:
         if not TOKEN:
-            logger.error("TOKEN не задан в .env файле")
+            logger.error("TOKEN не задан")
             return
         
         logger.info(f"Запуск бота...")
@@ -496,6 +505,8 @@ def main():
         
     except Exception as e:
         logger.exception(f"Критическая ошибка: {e}")
+        if __name__ == "__main__":
+    main()
 
 if __name__ == "__main__":
     main()
