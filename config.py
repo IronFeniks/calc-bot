@@ -1,15 +1,18 @@
 import os
+from dotenv import load_dotenv
 
-# Токен бота (получите у @BotFather если еще нет)
-TOKEN = "8781867816:AAHTUiftksAirLCllqFoALgeCUAJ0nNEkP0"
+# Загружаем переменные из .env файла
+load_dotenv()
 
-# ID группы и темы (ваши данные)
-GROUP_ID = -1003300908374
-TOPIC_ID = 3830
+# Токен бота
+TOKEN = os.getenv('TOKEN')
 
-# Ссылка на Яндекс Таблицу в формате CSV
-# ЗАМЕНИТЕ НА СВОЮ ССЫЛКУ ПОЗЖЕ
-YANDEX_TABLE_URL = "https://docs.yandex.ru/i/oX1mZgw-1NdaLg?format=csv"
+# ID группы и темы
+GROUP_ID = int(os.getenv('GROUP_ID', 0))
+TOPIC_ID = int(os.getenv('TOPIC_ID', 0))
+
+# Ссылка на Яндекс Таблицу
+YANDEX_TABLE_URL = os.getenv('YANDEX_TABLE_URL')
 
 # Настройки кэширования
-CACHE_TTL = 300  # 5 минут
+CACHE_TTL = int(os.getenv('CACHE_TTL', 300))
