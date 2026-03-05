@@ -24,31 +24,51 @@ sessions = {}  # Хранилище сессий пользователей
 
 # ==================== ЗАГРУЗКА ИЗ ЯНДЕКС ТАБЛИЦЫ ====================
 def load_from_yandex():
-    """Загружает данные из Яндекс Таблицы"""
+    """Загружает данные из Яндекс Таблицы с подробной диагностикой"""
     global cached_data, last_update
     
     current_time = time.time()
     if cached_data and (current_time - last_update) < CACHE_TTL:
-        logger.info("Используем кэшированные данные")
+        logger.info("✅ Используем кэшированные данные")
         return cached_data
     
+    logger.info("=" * 50)
+    logger.info("НАЧАЛО ЗАГРУЗКИ ИЗ ЯНДЕКС ТАБЛИЦЫ")
+    logger.info(f"URL: {YANDEX_TABLE_URL}")
+    
     if not YANDEX_TABLE_URL:
-        logger.error("YANDEX_TABLE_URL не задан")
+        logger.error("❌ YANDEX_TABLE_URL пустой")
         return {'nomenclature': [], 'specifications': []}
     
     try:
-        logger.info(f"Загрузка из Яндекс Таблицы: {YANDEX_TABLE_URL}")
+        # Шаг 1: Запрос к серверу
+        logger.info("Шаг 1: Отправка HTTP запроса...")
         response = requests.get(YANDEX_TABLE_URL, timeout=30)
+        logger.info(f"Шаг 2: Статус ответа: {response.status_code}")
         
         if response.status_code != 200:
-            logger.error(f"Ошибка загрузки: HTTP {response.status_code}")
+            logger.error(f"❌ Ошибка HTTP: {response.status_code}")
             return {'nomenclature': [], 'specifications': []}
         
-        # Читаем CSV
-        df = pd.read_csv(BytesIO(response.content))
-        logger.info(f"CSV загружен, колонки: {list(df.columns)}")
+        # Шаг 3: Размер ответа
+        content_length = len(response.content)
+        logger.info(f"Шаг 3: Размер ответа: {content_length} байт")
         
-        # ВРЕМЕННО: тестовые данные пока не настроим структуру CSV
+        if content_length < 100:
+            logger.warning(f"⚠️ Ответ подозрительно маленький: {content_length} байт")
+            logger.info(f"Содержимое: {response.content[:200]}")
+        
+        # Шаг 4: Чтение CSV
+        logger.info("Шаг 4: Попытка прочитать CSV...")
+        df = pd.read_csv(BytesIO(response.content))
+        logger.info(f"✅ CSV прочитан успешно!")
+        logger.info(f"Колонки в CSV: {list(df.columns)}")
+        logger.info(f"Количество строк: {len(df)}")
+        
+        # Шаг 5: Здесь должна быть ваша логика преобразования
+        # ПОКА ИСПОЛЬЗУЕМ ТЕСТОВЫЕ ДАННЫЕ
+        logger.info("Шаг 5: Использую тестовые данные (временное решение)")
+        
         nomenclature = [
             {'Код': 'Изд001', 'Наименование': 'Балка', 'Тип': 'Изделие', 
              'Фикс_производство': 500000, 'Выход_с_чертежа': 10, 'Категория': 'Сооружения'},
@@ -56,14 +76,11 @@ def load_from_yandex():
              'Фикс_производство': 200000, 'Выход_с_чертежа': 5, 'Категория': 'Сооружения'},
             {'Код': 'Мат001', 'Наименование': 'Болт М10', 'Тип': 'Материал', 
              'Фикс_производство': 0, 'Выход_с_чертежа': 1, 'Категория': 'Такелаж'},
-            {'Код': 'Мат002', 'Наименование': 'Гайка М10', 'Тип': 'Материал', 
-             'Фикс_производство': 0, 'Выход_с_чертежа': 1, 'Категория': 'Такелаж'},
         ]
         
         specifications = [
             {'Родитель_код': 'Изд001', 'Потомок_код': 'Изд002', 'Количество': 1},
             {'Родитель_код': 'Изд001', 'Потомок_код': 'Мат001', 'Количество': 4},
-            {'Родитель_код': 'Изд001', 'Потомок_код': 'Мат002', 'Количество': 4},
             {'Родитель_код': 'Изд002', 'Потомок_код': 'Мат001', 'Количество': 2},
         ]
         
@@ -73,13 +90,27 @@ def load_from_yandex():
         }
         last_update = current_time
         
-        logger.info(f"Загружено: {len(nomenclature)} записей номенклатуры, {len(specifications)} спецификаций")
+        logger.info("✅ Данные успешно загружены (тестовые)")
+        logger.info(f"Номенклатура: {len(nomenclature)} записей")
+        logger.info(f"Спецификации: {len(specifications)} записей")
+        logger.info("=" * 50)
+        
         return cached_data
         
+    except requests.exceptions.Timeout:
+        logger.error("❌ Таймаут при запросе к Яндекс Таблице")
+    except requests.exceptions.ConnectionError:
+        logger.error("❌ Ошибка соединения с Яндекс Таблицей")
+    except pd.errors.EmptyDataError:
+        logger.error("❌ CSV файл пустой")
     except Exception as e:
-        logger.error(f"Ошибка загрузки: {e}")
-        return {'nomenclature': [], 'specifications': []}
-
+        logger.error(f"❌ Неожиданная ошибка: {type(e).__name__}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+    
+    logger.error("❌ Загрузка не удалась, возвращаем пустые данные")
+    logger.info("=" * 50)
+    return {'nomenclature': [], 'specifications': []}
 # ==================== ПРОВЕРКА ДОСТУПА ====================
 async def check_access(update: Update) -> bool:
     """Проверяет, что сообщение из нужной группы и темы"""
