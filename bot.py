@@ -1,14 +1,9 @@
 import logging
-import json
 import time
-import pandas as pd
-import requests
-from io import BytesIO
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
-
-# Импортируем настройки из config.py
-from config import TOKEN, GROUP_ID, TOPIC_ID, YANDEX_TABLE_URL, CACHE_TTL
+from config import TOKEN, GROUP_ID, TOPIC_ID
+import database as db
 
 # ==================== НАСТРОЙКА ЛОГИРОВАНИЯ ====================
 logging.basicConfig(
@@ -17,103 +12,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== ХРАНИЛИЩЕ ДАННЫХ ====================
-cached_data = None
-last_update = 0
-sessions = {}  # Хранилище сессий пользователей
-
-# ==================== ЗАГРУЗКА ИЗ ЯНДЕКС ТАБЛИЦЫ ====================
-def load_from_yandex():
-    """Загружает данные из Яндекс Таблицы с подробной диагностикой"""
-    global cached_data, last_update
-    
-    current_time = time.time()
-    if cached_data and (current_time - last_update) < CACHE_TTL:
-        logger.info("✅ Используем кэшированные данные")
-        return cached_data
-    
-    logger.info("=" * 50)
-    logger.info("НАЧАЛО ЗАГРУЗКИ ИЗ ЯНДЕКС ТАБЛИЦЫ")
-    logger.info(f"URL: {YANDEX_TABLE_URL}")
-    
-    if not YANDEX_TABLE_URL:
-        logger.error("❌ YANDEX_TABLE_URL пустой")
-        return {'nomenclature': [], 'specifications': []}
-    
-    try:
-        # Шаг 1: Запрос к серверу
-        logger.info("Шаг 1: Отправка HTTP запроса...")
-        response = requests.get(YANDEX_TABLE_URL, timeout=30)
-        logger.info(f"Шаг 2: Статус ответа: {response.status_code}")
-        
-        if response.status_code != 200:
-            logger.error(f"❌ Ошибка HTTP: {response.status_code}")
-            return {'nomenclature': [], 'specifications': []}
-        
-        # Шаг 3: Размер ответа
-        content_length = len(response.content)
-        logger.info(f"Шаг 3: Размер ответа: {content_length} байт")
-        
-        if content_length < 100:
-            logger.warning(f"⚠️ Ответ подозрительно маленький: {content_length} байт")
-            logger.info(f"Содержимое: {response.content[:200]}")
-        
-        # Шаг 4: Чтение CSV
-        logger.info("Шаг 4: Попытка прочитать CSV...")
-        df = pd.read_csv(BytesIO(response.content))
-        logger.info(f"✅ CSV прочитан успешно!")
-        logger.info(f"Колонки в CSV: {list(df.columns)}")
-        logger.info(f"Количество строк: {len(df)}")
-        
-        # Шаг 5: Здесь должна быть ваша логика преобразования
-        # ПОКА ИСПОЛЬЗУЕМ ТЕСТОВЫЕ ДАННЫЕ
-        logger.info("Шаг 5: Использую тестовые данные (временное решение)")
-        
-        nomenclature = [
-            {'Код': 'Изд001', 'Наименование': 'Балка', 'Тип': 'Изделие', 
-             'Фикс_производство': 500000, 'Выход_с_чертежа': 10, 'Категория': 'Сооружения'},
-            {'Код': 'Изд002', 'Наименование': 'Каркас', 'Тип': 'Узел', 
-             'Фикс_производство': 200000, 'Выход_с_чертежа': 5, 'Категория': 'Сооружения'},
-            {'Код': 'Мат001', 'Наименование': 'Болт М10', 'Тип': 'Материал', 
-             'Фикс_производство': 0, 'Выход_с_чертежа': 1, 'Категория': 'Такелаж'},
-            {'Код': 'Мат002', 'Наименование': 'Гайка М10', 'Тип': 'Материал', 
-             'Фикс_производство': 0, 'Выход_с_чертежа': 1, 'Категория': 'Такелаж'},
-        ]
-        
-        specifications = [
-            {'Родитель_код': 'Изд001', 'Потомок_код': 'Изд002', 'Количество': 1},
-            {'Родитель_код': 'Изд001', 'Потомок_код': 'Мат001', 'Количество': 4},
-            {'Родитель_код': 'Изд001', 'Потомок_код': 'Мат002', 'Количество': 4},
-            {'Родитель_код': 'Изд002', 'Потомок_код': 'Мат001', 'Количество': 2},
-        ]
-        
-        cached_data = {
-            'nomenclature': nomenclature,
-            'specifications': specifications
-        }
-        last_update = current_time
-        
-        logger.info("✅ Данные успешно загружены (тестовые)")
-        logger.info(f"Номенклатура: {len(nomenclature)} записей")
-        logger.info(f"Спецификации: {len(specifications)} записей")
-        logger.info("=" * 50)
-        
-        return cached_data
-        
-    except requests.exceptions.Timeout:
-        logger.error("❌ Таймаут при запросе к Яндекс Таблице")
-    except requests.exceptions.ConnectionError:
-        logger.error("❌ Ошибка соединения с Яндекс Таблицей")
-    except pd.errors.EmptyDataError:
-        logger.error("❌ CSV файл пустой")
-    except Exception as e:
-        logger.error(f"❌ Неожиданная ошибка: {type(e).__name__}: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-    
-    logger.error("❌ Загрузка не удалась, возвращаем пустые данные")
-    logger.info("=" * 50)
-    return {'nomenclature': [], 'specifications': []}
+# ==================== ХРАНИЛИЩЕ СЕССИЙ ====================
+sessions = {}
 
 # ==================== ПРОВЕРКА ДОСТУПА ====================
 async def check_access(update: Update) -> bool:
@@ -131,73 +31,49 @@ async def check_access(update: Update) -> bool:
     return False
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
-def find_product(product_name, nomenclature):
-    """Поиск изделия по названию"""
-    for item in nomenclature:
-        if item.get('Наименование') and item['Наименование'].lower() == product_name.lower():
-            return item
-    return None
-
-def collect_materials(product_code, multiplier, nomenclature, specifications):
-    """Рекурсивный сбор материалов"""
-    materials = {}
-    
-    def explode(code, mult):
-        for spec in specifications:
-            if str(spec.get('Родитель_код')) == str(code):
-                for item in nomenclature:
-                    if str(item.get('Код')) == str(spec.get('Потомок_код')):
-                        if item.get('Тип') == 'Материал':
-                            if item['Код'] not in materials:
-                                materials[item['Код']] = {
-                                    'name': item['Наименование'],
-                                    'baseQty': 0
-                                }
-                            qty = float(spec.get('Количество', 0)) * mult
-                            materials[item['Код']]['baseQty'] += qty
-                        elif item.get('Тип') == 'Узел':
-                            explode(item['Код'], mult * float(spec.get('Количество', 0)))
-    
-    explode(product_code, multiplier)
-    return materials
-
-def calculate_materials(materials, qty, drawings_needed, efficiency):
-    """Расчет количества материалов с эффективностью"""
-    materials_list = []
-    
-    for m in materials.values():
-        # Формула: (baseQty / 1.5) * (efficiency / 100)
-        raw = (m['baseQty'] / 1.5) * (efficiency / 100)
-        # Округление вверх до 1 знака
-        rounded = (raw * 10 // 1 + 1) / 10 if raw * 10 % 1 > 0 else raw
-        final_qty = rounded * drawings_needed
-        
-        materials_list.append({
-            'name': m['name'],
-            'qty': final_qty,
-            'price': 0,
-            'cost': 0
-        })
-    
-    return materials_list
-
 def format_number(num):
     """Форматирование числа с разделителями"""
     return f"{num:,.2f}".replace(",", " ")
+
+def calculate_materials_with_efficiency(materials, qty, efficiency):
+    """Расчет количества материалов с учетом эффективности"""
+    result = []
+    total_cost = 0
+    
+    for m in materials:
+        # Формула: (базовое_количество / 1.5) * (эффективность / 100)
+        raw = (m['quantity'] / 1.5) * (efficiency / 100)
+        # Округление вверх до 1 знака
+        rounded = (raw * 10 // 1 + 1) / 10 if raw * 10 % 1 > 0 else raw
+        final_qty = rounded * qty
+        
+        # Пока цены тестовые (потом можно брать из базы)
+        price = 100
+        cost = final_qty * price
+        total_cost += cost
+        
+        result.append({
+            'name': m['name'],
+            'quantity': final_qty,
+            'price': price,
+            'cost': cost
+        })
+    
+    return result, total_cost
 
 def format_materials(materials):
     """Форматирование списка материалов"""
     result = ""
     for i, m in enumerate(materials, 1):
-        result += f"{i}. {m['name']}: {format_number(m['qty'])} шт"
+        result += f"{i}. {m['name']}: {format_number(m['quantity'])} шт"
         if m['price'] > 0:
-            result += f" × {format_number(m['price'])}₽ = {format_number(m['qty'] * m['price'])}₽\n"
+            result += f" × {format_number(m['price'])}₽ = {format_number(m['cost'])}₽\n"
         else:
             result += " (цена не указана)\n"
     return result
 
 def format_money_block(data):
-    """Форматирование блока Деньги (без Markdown)"""
+    """Форматирование блока Деньги"""
     result = f"💰 ДЕНЬГИ\n\n"
     result += f"ИТОГО за {data['qty']} шт:\n"
     result += f"Материалы: {format_number(data['materialCost'])}₽\n"
@@ -225,38 +101,25 @@ def format_money_block(data):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка команды /start"""
-    logger.info(f"📨 Получена команда /start от пользователя {update.effective_user.id}")
+    logger.info(f"📨 /start от {update.effective_user.id}")
     
     if not await check_access(update):
-        logger.warning("⛔ Доступ запрещен")
         return
-    
-    logger.info("✅ Доступ разрешен")
     
     user_id = update.effective_user.id
     if user_id in sessions:
         del sessions[user_id]
     
-    data = load_from_yandex()
+    # Инициализируем базу данных при первом запуске
+    db.init_database()
     
-    if not data['nomenclature']:
-        await update.message.reply_text(
-            "❌ Не удалось загрузить данные из Яндекс Таблицы.\n"
-            "Проверьте ссылку в настройках."
-        )
-        return
-    
-    # Получаем уникальные категории
-    categories = list(set(
-        item.get('Категория', 'Без категории') 
-        for item in data['nomenclature'] 
-        if item.get('Категория')
-    ))
+    categories = db.get_all_categories()
     
     if not categories:
-        categories = ["Все изделия"]
+        await update.message.reply_text("❌ Нет доступных категорий в базе данных")
+        return
     
-    # Создаем клавиатуру
+    # Создаем клавиатуру с категориями
     keyboard = []
     for cat in categories[:10]:  # Ограничим 10 категориями
         keyboard.append([InlineKeyboardButton(cat, callback_data=f"cat_{cat}")])
@@ -279,9 +142,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "cancel":
         if user_id in sessions:
             del sessions[user_id]
-        await query.edit_message_text(
-            "❌ Расчет отменен. Используйте /start для нового расчета."
-        )
+        await query.edit_message_text("❌ Расчет отменен. Используйте /start для нового расчета.")
         return
     
     if data.startswith("cat_"):
@@ -310,13 +171,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id in sessions:
             del sessions[user_id]
         
-        data = load_from_yandex()
-        categories = list(set(
-            item.get('Категория', 'Без категории') 
-            for item in data['nomenclature'] 
-            if item.get('Категория')
-        ))
-        
+        categories = db.get_all_categories()
         keyboard = []
         for cat in categories[:10]:
             keyboard.append([InlineKeyboardButton(cat, callback_data=f"cat_{cat}")])
@@ -338,9 +193,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session = sessions.get(user_id)
     
     if not session:
-        await update.message.reply_text(
-            "Используйте /start для начала расчета"
-        )
+        await update.message.reply_text("Используйте /start для начала расчета")
         return
     
     text = update.message.text
@@ -367,14 +220,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'tax': tax
         })
         
-        data = load_from_yandex()
-        products = [
-            item['Наименование'] for item in data['nomenclature']
-            if item.get('Тип') in ['Изделие', 'Узел']
-        ]
-        products.sort()
+        # Получаем изделия для выбранной категории
+        products = db.get_products_by_category(session['category'])
         
-        products_list = "\n".join([f"• {p}" for p in products[:20]])
+        if not products:
+            await update.message.reply_text("❌ Нет изделий в этой категории")
+            return
+        
+        products_list = "\n".join([f"• {p['name']}" for p in products[:20]])
         if len(products) > 20:
             products_list += f"\n... и еще {len(products) - 20}"
         
@@ -388,8 +241,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     elif session['step'] == 'product_selection':
-        data = load_from_yandex()
-        product = find_product(text, data['nomenclature'])
+        product = db.find_product_by_name(text)
         
         if not product:
             await update.message.reply_text(
@@ -397,16 +249,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
+        # Получаем кратность из базы
+        try:
+            output_per_drawing = int(product.get('multiplicity', 1))
+        except:
+            output_per_drawing = 1
+        
         session.update({
             'step': 'quantities',
             'product': product,
-            'qty': None
+            'output_per_drawing': output_per_drawing
         })
         
-        output_per_drawing = product.get('Выход_с_чертежа', 1)
-        
         await update.message.reply_text(
-            f"✅ Выбрано: {product['Наименование']}\n"
+            f"✅ Выбрано: {product['name']}\n"
             f"Кратность: {output_per_drawing}\n\n"
             f"💰 Введите через пробел:\n"
             f"Рыночная цена Стоимость чертежа изделия\n\n"
@@ -449,10 +305,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Введите число")
             return
         
-        product = session['product']
-        output_per_drawing = product.get('Выход_с_чертежа', 1)
-        
         # Проверка кратности
+        output_per_drawing = session.get('output_per_drawing', 1)
         if qty % output_per_drawing != 0:
             await update.message.reply_text(
                 f"⚠️ Количество должно быть кратно {output_per_drawing}"
@@ -461,25 +315,29 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         drawings_needed = int(qty // output_per_drawing)
         
-        data = load_from_yandex()
-        materials_dict = collect_materials(
-            product['Код'], 1, 
-            data['nomenclature'], 
-            data['specifications']
+        # Получаем материалы из базы
+        product_code = session['product']['code']
+        materials = db.get_materials_for_product(product_code)
+        
+        if not materials:
+            await update.message.reply_text("❌ Нет материалов для этого изделия")
+            return
+        
+        # Рассчитываем материалы с эффективностью
+        materials_list, material_cost = calculate_materials_with_efficiency(
+            materials, qty, session['efficiency']
         )
         
-        materials_list = calculate_materials(
-            materials_dict, qty, drawings_needed, session['efficiency']
-        )
+        # Получаем цену производства из базы
+        try:
+            price_str = session['product'].get('price', '0')
+            # Очищаем строку от " ISK" и пробелов
+            price_clean = price_str.replace(' ISK', '').replace(' ', '')
+            prod_cost_per_unit = float(price_clean) if price_clean else 0
+        except:
+            prod_cost_per_unit = 0
         
-        # ВРЕМЕННО: используем тестовые цены
-        material_cost = 0
-        for m in materials_list:
-            m['price'] = 100
-            m['cost'] = m['qty'] * 100
-            material_cost += m['cost']
-        
-        prod_cost = product.get('Фикс_производство', 0) * drawings_needed
+        prod_cost = prod_cost_per_unit * drawings_needed
         drawing_cost = session['drawing_price'] * drawings_needed
         total_cost = material_cost + prod_cost + drawing_cost
         revenue = session['market_price'] * qty
@@ -505,7 +363,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(
             f"📊 РЕЗУЛЬТАТЫ РАСЧЕТА\n\n"
-            f"Изделие: {product['Наименование']}\n"
+            f"Изделие: {session['product']['name']}\n"
             f"Количество: {qty:.0f} шт\n"
             f"Эффективность: {session['efficiency']:.0f}%\n"
             f"Налог: {session['tax']:.0f}%\n\n"
@@ -513,6 +371,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{money_text}"
         )
         
+        # Очищаем сессию
         del sessions[user_id]
         return
 
@@ -526,7 +385,14 @@ def main():
         
         logger.info(f"Запуск бота...")
         logger.info(f"Группа: {GROUP_ID}, Тема: {TOPIC_ID}")
-        logger.info(f"URL таблицы: {YANDEX_TABLE_URL}")
+        
+        # Проверяем подключение к базе при старте
+        try:
+            db.init_database()
+            categories = db.get_all_categories()
+            logger.info(f"✅ База данных подключена. Категории: {len(categories)}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка подключения к БД: {e}")
         
         app = Application.builder().token(TOKEN).build()
         app.add_handler(CommandHandler("start", start))
