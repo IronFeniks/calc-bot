@@ -6,6 +6,8 @@ load_dotenv()
 
 # Токен бота
 TOKEN = os.getenv('TOKEN')
+if not TOKEN:
+    raise ValueError("TOKEN не задан в .env файле")
 
 # ID группы и темы
 GROUP_ID = int(os.getenv('GROUP_ID', 0))
