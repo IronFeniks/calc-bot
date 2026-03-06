@@ -8,7 +8,7 @@ GROUP_ID = -1003300908374
 TOPIC_ID = 3830
 
 # Ссылка на Яндекс Таблицу
-YANDEX_TABLE_URL = "https://docs.yandex.ru/file/oX1mZgw-1NdaLg?format=csv"
+YANDEX_TABLE_URL = "https://disk.yandex.ru/i/oX1mZgw-1NdaLg"
 
 # Настройки кэширования
 CACHE_TTL = 300
