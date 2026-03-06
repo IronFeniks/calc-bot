@@ -176,7 +176,7 @@ def format_results(product_name, qty, efficiency, tax_rate, materials_list, resu
     
     return text
 
-async def show_products_page(update: Update, session, edit: bool = False):
+async def show_products_page(update_or_query, session, edit: bool = False):
     """Показывает страницу со списком изделий"""
     products = session['products']
     page = session.get('product_page', 0)
@@ -210,19 +210,19 @@ async def show_products_page(update: Update, session, edit: bool = False):
     keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
     
     if edit:
-        # Редактируем существующее сообщение
-        await update.message.edit_text(
+        # Редактируем существующее сообщение (пришло из callback query)
+        await update_or_query.message.edit_text(
             text,
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
         )
     else:
-        # Отправляем новое сообщение
-        await update.message.reply_text(
+        # Отправляем новое сообщение (пришло из текстового сообщения)
+        await update_or_query.message.reply_text(
             text,
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
-    )
+        )
 
 # ==================== КОМАНДЫ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -280,17 +280,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # Навигация по страницам списка изделий
-if data in ["prev_page", "next_page"]:
-    session = sessions.get(user_id)
-    if session and session.get('step') == 'product_selection':
-        if data == "prev_page":
-            session['product_page'] = max(0, session.get('product_page', 0) - 1)
-        else:
-            session['product_page'] = session.get('product_page', 0) + 1
-        
-        # Передаем edit=True, чтобы редактировать текущее сообщение
-        await show_products_page(update, session, edit=True)
-    return
+    if data in ["prev_page", "next_page"]:
+        session = sessions.get(user_id)
+        if session and session.get('step') == 'product_selection':
+            if data == "prev_page":
+                session['product_page'] = max(0, session.get('product_page', 0) - 1)
+            else:
+                session['product_page'] = session.get('product_page', 0) + 1
+            
+            # Передаем edit=True, чтобы редактировать текущее сообщение
+            await show_products_page(query, session, edit=True)
+        return
     
     # Возврат к категориям
     if data == "back_to_categories":
@@ -327,8 +327,7 @@ if data in ["prev_page", "next_page"]:
         if session and session.get('step') in ['prices', 'quantity', 'material_prices']:
             session['step'] = 'product_selection'
             session['product_page'] = 0
-            await query.edit_message_text("⏳ Загружаем...")
-            await show_products_page(update, session)
+            await show_products_page(query, session, edit=True)
         return
     
     if data.startswith("cat_"):
@@ -407,7 +406,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         })
         
         # Показываем первую страницу списка изделий
-await show_products_page(update, session, edit=False)
+        await show_products_page(update, session, edit=False)
+        return
     
     # Шаг 2: Выбор изделия по номеру
     elif session['step'] == 'product_selection':
