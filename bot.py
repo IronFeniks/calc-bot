@@ -53,6 +53,11 @@ def load_from_yandex():
         logger.info(f"Загружено: номенклатура {len(nomenclature)} записей")
         logger.info(f"Спецификации: {len(specifications)} записей")
         
+        # Для отладки покажем первую запись номенклатуры
+        if nomenclature:
+            logger.info(f"Пример записи: {nomenclature[0]}")
+            logger.info(f"Ключи в записи: {list(nomenclature[0].keys())}")
+        
         cached_data = {
             'nomenclature': nomenclature,
             'specifications': specifications
@@ -176,19 +181,35 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Ошибка загрузки данных")
         return
     
-    # ИСПРАВЛЕНО: 'Категории' вместо 'Категория'
-    categories = list(set(
+    # Получаем и очищаем категории
+    raw_categories = list(set(
         item.get('Категории', '') for item in data['nomenclature'] 
         if item.get('Категории')
     ))
     
-    if not categories:
-        await update.message.reply_text("❌ Нет категорий в базе")
+    logger.info(f"Сырые категории: {raw_categories}")
+    
+    # Очищаем от лишних символов
+    clean_categories = []
+    for cat in raw_categories:
+        if cat and str(cat).strip():
+            clean_cat = str(cat).strip()
+            # Удаляем возможные символы разметки
+            clean_cat = clean_cat.replace('*', '').replace('_', '').replace('[', '').replace(']', '')
+            if clean_cat:
+                clean_categories.append(clean_cat)
+    
+    logger.info(f"Очищенные категории: {clean_categories}")
+    
+    if not clean_categories:
+        await update.message.reply_text("❌ В базе нет категорий")
         return
     
+    # Создаем клавиатуру - ограничим 10 категориями для удобства
     keyboard = []
-    for cat in categories[:10]:
+    for cat in clean_categories[:10]:
         keyboard.append([InlineKeyboardButton(cat, callback_data=f"cat_{cat}")])
+    
     keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
     
     await update.message.reply_text(
@@ -223,11 +244,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "back_to_categories":
         sessions.pop(user_id, None)
         data = load_from_yandex()
-        categories = list(set(item.get('Категории', '') for item in data['nomenclature'] if item.get('Категории')))
+        
+        raw_categories = list(set(
+            item.get('Категории', '') for item in data['nomenclature'] 
+            if item.get('Категории')
+        ))
+        
+        clean_categories = []
+        for cat in raw_categories:
+            if cat and str(cat).strip():
+                clean_cat = str(cat).strip().replace('*', '').replace('_', '').replace('[', '').replace(']', '')
+                if clean_cat:
+                    clean_categories.append(clean_cat)
+        
         keyboard = []
-        for cat in categories[:10]:
+        for cat in clean_categories[:10]:
             keyboard.append([InlineKeyboardButton(cat, callback_data=f"cat_{cat}")])
         keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
+        
         await query.edit_message_text(
             "👋 Производственный калькулятор\n\nВыберите категорию:",
             reply_markup=InlineKeyboardMarkup(keyboard)
@@ -246,6 +280,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     text = update.message.text
+    logger.info(f"Текст от пользователя {user_id}: {text}, шаг: {session.get('step')}")
     
     if session['step'] == 'parameters':
         parts = text.split()
@@ -256,7 +291,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             efficiency = float(parts[0])
             tax = float(parts[1])
-        except:
+        except ValueError:
             await update.message.reply_text("❌ Введите числа")
             return
         
@@ -281,7 +316,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Изделие не найдено")
             return
         
-        # ИСПРАВЛЕНО: 'Кратность' вместо 'Выход_с_чертежа'
         session.update({
             'step': 'quantities',
             'product': product,
@@ -304,7 +338,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             market_price = float(parts[0])
             drawing_price = float(parts[1])
-        except:
+        except ValueError:
             await update.message.reply_text("❌ Введите числа")
             return
         
@@ -316,7 +350,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif session['step'] == 'final_calculation':
         try:
             qty = float(text)
-        except:
+        except ValueError:
             await update.message.reply_text("❌ Введите число")
             return
         
@@ -330,12 +364,19 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         drawings_needed = int(qty // output)
         data = load_from_yandex()
         
-        # ИСПРАВЛЕНО: 'Родитель' и 'Потомок' вместо 'Родитель_код' и 'Потомок_код'
         materials_dict = collect_materials(product['Код'], 1, data['nomenclature'], data['specifications'])
         materials_list, material_cost = calculate_materials(materials_dict, qty, drawings_needed, session['efficiency'])
         
-        # ИСПРАВЛЕНО: 'Цена производства' вместо 'Цена производства ISK'
-        prod_cost = float(str(product.get('Цена производства', '0')).replace(' ISK', '').replace(' ', '')) * drawings_needed
+        # Очищаем цену производства от " ISK" и пробелов
+        price_str = str(product.get('Цена производства', '0'))
+        price_clean = price_str.replace(' ISK', '').replace(' ', '')
+        try:
+            prod_cost_per_unit = float(price_clean) if price_clean else 0
+        except:
+            prod_cost_per_unit = 0
+            logger.error(f"Не удалось преобразовать цену: {price_str}")
+        
+        prod_cost = prod_cost_per_unit * drawings_needed
         drawing_cost = session['drawing_price'] * drawings_needed
         total = material_cost + prod_cost + drawing_cost
         revenue = session['market_price'] * qty
