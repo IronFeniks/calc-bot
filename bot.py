@@ -19,44 +19,39 @@ cached_data = None
 last_update = 0
 sessions = {}
 
-# ==================== ЗАГРУЗКА С ЯНДЕКС.ДИСКА ====================
+# ==================== ЗАГРУЗКА С GOOGLE ДИСКА ====================
 def load_from_yandex():
     """Загружает Excel-файл с Google Диска"""
     global cached_data, last_update
     
-    if cached_data and (time.time() - last_update) < CACHE_TTL:
+    current_time = time.time()
+    if cached_data and (current_time - last_update) < CACHE_TTL:
+        logger.info("Используем кэшированные данные")
         return cached_data
-
+    
+    if not YANDEX_TABLE_URL:
+        logger.error("YANDEX_TABLE_URL не задан")
+        return {'nomenclature': [], 'specifications': []}
+    
     try:
         logger.info(f"Загрузка файла: {YANDEX_TABLE_URL}")
+        
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         response = requests.get(YANDEX_TABLE_URL, headers=headers, timeout=30)
-
+        
         if response.status_code != 200:
-            logger.error(f"Ошибка HTTP: {response.status_code}")
+            logger.error(f"Ошибка загрузки: HTTP {response.status_code}")
             return {'nomenclature': [], 'specifications': []}
-
-        workbook = pd.ExcelFile(BytesIO(response.content))
-        nomenclature = pd.read_excel(workbook, sheet_name='Номенклатура').to_dict('records')
-        specifications = pd.read_excel(workbook, sheet_name='Спецификации').to_dict('records')
-
-        cached_data = {'nomenclature': nomenclature, 'specifications': specifications}
-        last_update = time.time()
-        logger.info(f"Загружено: номенклатура {len(nomenclature)} записей")
-        return cached_data
-
-    except Exception as e:
-        logger.error(f"Ошибка загрузки: {e}")
-        return {'nomenclature': [], 'specifications': []}
         
         # Читаем Excel
         workbook = pd.ExcelFile(BytesIO(response.content))
         
-        # Загружаем листы
+        # Загружаем листы с правильными названиями
         nomenclature = pd.read_excel(workbook, sheet_name='Номенклатура').to_dict('records')
         specifications = pd.read_excel(workbook, sheet_name='Спецификации').to_dict('records')
         
-        logger.info(f"Загружено: номенклатура {len(nomenclature)} записей, спецификации {len(specifications)} записей")
+        logger.info(f"Загружено: номенклатура {len(nomenclature)} записей")
+        logger.info(f"Спецификации: {len(specifications)} записей")
         
         cached_data = {
             'nomenclature': nomenclature,
@@ -96,10 +91,10 @@ def collect_materials(product_code, multiplier, nomenclature, specifications):
     
     def explode(code, mult):
         for spec in specifications:
-            if str(spec.get('Родитель_код')) == str(code):
+            if str(spec.get('Родитель')) == str(code):
                 for item in nomenclature:
-                    if str(item.get('Код')) == str(spec.get('Потомок_код')):
-                        if item.get('Тип') == 'Материал':
+                    if str(item.get('Код')) == str(spec.get('Потомок')):
+                        if item.get('Тип') == 'материал':
                             if item['Код'] not in materials:
                                 materials[item['Код']] = {
                                     'name': item['Наименование'],
@@ -107,7 +102,7 @@ def collect_materials(product_code, multiplier, nomenclature, specifications):
                                 }
                             qty = float(spec.get('Количество', 0)) * mult
                             materials[item['Код']]['baseQty'] += qty
-                        elif item.get('Тип') == 'Узел':
+                        elif item.get('Тип') == 'узел':
                             explode(item['Код'], mult * float(spec.get('Количество', 0)))
     
     explode(product_code, multiplier)
@@ -181,10 +176,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Ошибка загрузки данных")
         return
     
+    # ИСПРАВЛЕНО: 'Категории' вместо 'Категория'
     categories = list(set(
-        item.get('Категория', '') for item in data['nomenclature'] 
-        if item.get('Категория')
+        item.get('Категории', '') for item in data['nomenclature'] 
+        if item.get('Категории')
     ))
+    
+    if not categories:
+        await update.message.reply_text("❌ Нет категорий в базе")
+        return
     
     keyboard = []
     for cat in categories[:10]:
@@ -223,7 +223,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "back_to_categories":
         sessions.pop(user_id, None)
         data = load_from_yandex()
-        categories = list(set(item.get('Категория', '') for item in data['nomenclature'] if item.get('Категория')))
+        categories = list(set(item.get('Категории', '') for item in data['nomenclature'] if item.get('Категории')))
         keyboard = []
         for cat in categories[:10]:
             keyboard.append([InlineKeyboardButton(cat, callback_data=f"cat_{cat}")])
@@ -264,7 +264,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         data = load_from_yandex()
         products = [item['Наименование'] for item in data['nomenclature'] 
-                   if item.get('Тип') in ['Изделие', 'Узел']]
+                   if item.get('Тип') in ['изделие', 'узел']]
         products.sort()
         
         await update.message.reply_text(
@@ -281,15 +281,16 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Изделие не найдено")
             return
         
+        # ИСПРАВЛЕНО: 'Кратность' вместо 'Выход_с_чертежа'
         session.update({
             'step': 'quantities',
             'product': product,
-            'output_per_drawing': int(product.get('Выход_с_чертежа', 1))
+            'output_per_drawing': int(product.get('Кратность', 1))
         })
         
         await update.message.reply_text(
             f"✅ Выбрано: {product['Наименование']}\n"
-            f"Кратность: {product.get('Выход_с_чертежа', 1)}\n\n"
+            f"Кратность: {product.get('Кратность', 1)}\n\n"
             f"💰 Введите через пробел:\nРыночная цена Стоимость чертежа\nПример: 3200000 6900000"
         )
         return
@@ -328,10 +329,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         drawings_needed = int(qty // output)
         data = load_from_yandex()
-        materials = collect_materials(product['Код'], 1, data['nomenclature'], data['specifications'])
-        materials_list, material_cost = calculate_materials(materials, qty, drawings_needed, session['efficiency'])
         
-        prod_cost = float(product.get('Цена производства', '0').replace(' ISK', '').replace(' ', '')) * drawings_needed
+        # ИСПРАВЛЕНО: 'Родитель' и 'Потомок' вместо 'Родитель_код' и 'Потомок_код'
+        materials_dict = collect_materials(product['Код'], 1, data['nomenclature'], data['specifications'])
+        materials_list, material_cost = calculate_materials(materials_dict, qty, drawings_needed, session['efficiency'])
+        
+        # ИСПРАВЛЕНО: 'Цена производства' вместо 'Цена производства ISK'
+        prod_cost = float(str(product.get('Цена производства', '0')).replace(' ISK', '').replace(' ', '')) * drawings_needed
         drawing_cost = session['drawing_price'] * drawings_needed
         total = material_cost + prod_cost + drawing_cost
         revenue = session['market_price'] * qty
