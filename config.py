@@ -8,7 +8,7 @@ GROUP_ID = -1003300908374
 TOPIC_ID = 3830
 
 # Ссылка на Яндекс Таблицу
-YANDEX_TABLE_URL = "https://disk.yandex.ru/i/oX1mZgw-1NdaLg/download"
+YANDEX_TABLE_URL = "https://drive.google.com/uc?export=download&id=1RBLw-ls1sCdVEBxmIEZd1ILbifdX0wjq"
 
 # Настройки кэширования
 CACHE_TTL = 300
