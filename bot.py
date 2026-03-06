@@ -46,17 +46,12 @@ def load_from_yandex():
         # Читаем Excel
         workbook = pd.ExcelFile(BytesIO(response.content))
         
-        # Загружаем листы с правильными названиями
+        # Загружаем листы
         nomenclature = pd.read_excel(workbook, sheet_name='Номенклатура').to_dict('records')
         specifications = pd.read_excel(workbook, sheet_name='Спецификации').to_dict('records')
         
         logger.info(f"Загружено: номенклатура {len(nomenclature)} записей")
         logger.info(f"Спецификации: {len(specifications)} записей")
-        
-        # Для отладки покажем первую запись номенклатуры
-        if nomenclature:
-            logger.info(f"Пример записи: {nomenclature[0]}")
-            logger.info(f"Ключи в записи: {list(nomenclature[0].keys())}")
         
         cached_data = {
             'nomenclature': nomenclature,
@@ -83,10 +78,10 @@ async def check_access(update: Update) -> bool:
     logger.warning(f"Доступ запрещен: chat={chat_id}, topic={topic_id}")
     return False
 
-# ==================== ПОИСК ИЗДЕЛИЯ ====================
-def find_product(product_name, nomenclature):
+# ==================== ПОИСК ИЗДЕЛИЯ ПО КОДУ ====================
+def find_product_by_code(code, nomenclature):
     for item in nomenclature:
-        if item.get('Наименование') and item['Наименование'].lower() == product_name.lower():
+        if item.get('Код') == code:
             return item
     return None
 
@@ -114,15 +109,17 @@ def collect_materials(product_code, multiplier, nomenclature, specifications):
     return materials
 
 # ==================== РАСЧЕТ МАТЕРИАЛОВ ====================
-def calculate_materials(materials, qty, drawings_needed, efficiency):
+def calculate_materials(materials, qty, drawings_needed, efficiency, material_prices):
     materials_list = []
     total_cost = 0
     
+    i = 1
     for m in materials.values():
         raw = (m['baseQty'] / 1.5) * (efficiency / 100)
         rounded = (raw * 10 // 1 + 1) / 10 if raw * 10 % 1 > 0 else raw
         final_qty = rounded * drawings_needed
-        price = 100  # ВРЕМЕННО
+        
+        price = material_prices.get(m['name'], 0)
         cost = final_qty * price
         total_cost += cost
         
@@ -130,8 +127,10 @@ def calculate_materials(materials, qty, drawings_needed, efficiency):
             'name': m['name'],
             'qty': final_qty,
             'price': price,
-            'cost': cost
+            'cost': cost,
+            'number': i
         })
+        i += 1
     
     return materials_list, total_cost
 
@@ -139,32 +138,43 @@ def calculate_materials(materials, qty, drawings_needed, efficiency):
 def format_number(num):
     return f"{num:,.2f}".replace(",", " ")
 
-def format_materials(materials):
-    result = ""
-    for i, m in enumerate(materials, 1):
-        result += f"{i}. {m['name']}: {format_number(m['qty'])} шт × {format_number(m['price'])}₽ = {format_number(m['cost'])}₽\n"
+def format_materials_for_input(materials_list):
+    """Формирует список материалов для запроса цен"""
+    result = "📦 *Материалы*\n\nВведите цены через пробел в том же порядке:\n\n"
+    for m in materials_list:
+        result += f"{m['number']}. {m['name']} — нужно {format_number(m['qty'])} шт\n"
     return result
 
-def format_money_block(data):
-    result = f"💰 ДЕНЬГИ\n\n"
-    result += f"ИТОГО за {data['qty']} шт:\n"
-    result += f"Материалы: {format_number(data['materialCost'])}₽\n"
-    result += f"Производство: {format_number(data['prodCost'])}₽\n"
-    result += f"Чертежи: {format_number(data['drawingCost'])}₽\n"
-    result += f"Себестоимость: {format_number(data['totalCost'])}₽\n"
-    result += f"Выручка: {format_number(data['revenue'])}₽\n"
-    result += f"Прибыль до налога: {format_number(data['profitBeforeTax'])}₽\n"
-    result += f"Налог ({data['taxRate']}%): {format_number(data['tax'])}₽\n"
-    result += f"Прибыль после налога: {format_number(data['profitAfterTax'])}₽\n"
+def format_results(product_name, qty, efficiency, tax_rate, materials_list, result):
+    """Формирует финальный отчет"""
+    text = f"📊 *РЕЗУЛЬТАТЫ РАСЧЕТА*\n\n"
+    text += f"Изделие: {product_name}\n"
+    text += f"Количество: {qty:.0f} шт\n"
+    text += f"Эффективность: {efficiency:.0f}%\n"
+    text += f"Налог: {tax_rate:.0f}%\n\n"
     
-    if data['qty'] > 0:
-        per_unit = data['totalCost'] / data['qty']
-        per_unit_profit = data['profitAfterTax'] / data['qty']
-        result += f"\nНА 1 ШТУКУ:\n"
-        result += f"Себестоимость: {format_number(per_unit)}₽\n"
-        result += f"Прибыль: {format_number(per_unit_profit)}₽\n"
+    text += "*Материалы:*\n"
+    for m in materials_list:
+        text += f"{m['number']}. {m['name']}: {format_number(m['qty'])} шт × {format_number(m['price'])} ISK = {format_number(m['cost'])} ISK\n"
     
-    return result
+    text += f"\n💰 *ИТОГИ*\n"
+    text += f"Материалы: {format_number(result['materialCost'])} ISK\n"
+    text += f"Производство: {format_number(result['prodCost'])} ISK\n"
+    text += f"Чертежи: {format_number(result['drawingCost'])} ISK\n"
+    text += f"Себестоимость: {format_number(result['totalCost'])} ISK\n"
+    text += f"Выручка: {format_number(result['revenue'])} ISK\n"
+    text += f"Прибыль до налога: {format_number(result['profitBeforeTax'])} ISK\n"
+    text += f"Налог: {format_number(result['tax'])} ISK\n"
+    text += f"*Прибыль после налога: {format_number(result['profitAfterTax'])} ISK*\n"
+    
+    if qty > 0:
+        per_unit = result['totalCost'] / qty
+        per_unit_profit = result['profitAfterTax'] / qty
+        text += f"\n*НА 1 ШТУКУ:*\n"
+        text += f"Себестоимость: {format_number(per_unit)} ISK\n"
+        text += f"Прибыль: {format_number(per_unit_profit)} ISK\n"
+    
+    return text
 
 # ==================== КОМАНДЫ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -172,8 +182,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     user_id = update.effective_user.id
-    if user_id in sessions:
-        del sessions[user_id]
+    sessions[user_id] = {'step': 'categories'}
     
     data = load_from_yandex()
     
@@ -187,39 +196,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if item.get('Категории')
     ))
     
-    logger.info(f"Сырые категории: {raw_categories}")
-    
-    # Очищаем от лишних символов
     clean_categories = []
     for cat in raw_categories:
         if cat and str(cat).strip():
             clean_cat = str(cat).strip()
-            # Удаляем возможные символы разметки
-            clean_cat = clean_cat.replace('*', '').replace('_', '').replace('[', '').replace(']', '')
             if clean_cat:
                 clean_categories.append(clean_cat)
-    
-    logger.info(f"Очищенные категории: {clean_categories}")
     
     if not clean_categories:
         await update.message.reply_text("❌ В базе нет категорий")
         return
     
-    # Создаем клавиатуру - ограничим 10 категориями для удобства
+    # Создаем клавиатуру
     keyboard = []
     for cat in clean_categories[:10]:
         keyboard.append([InlineKeyboardButton(cat, callback_data=f"cat_{cat}")])
     
-    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
-    
     await update.message.reply_text(
-        "👋 Производственный калькулятор\n\nВыберите категорию:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        "👋 *Производственный калькулятор*\n\nВыберите категорию:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
     )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
     user_id = query.from_user.id
     data = query.data
     
@@ -230,41 +232,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if data.startswith("cat_"):
         category = data[4:]
-        sessions[user_id] = {'step': 'parameters', 'category': category}
-        keyboard = [
-            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_categories")],
-            [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
-        ]
-        await query.edit_message_text(
-            f"📊 Параметры расчета\nКатегория: {category}\n\nВведите через пробел:\nЭффективность (%) Налог (%)\nПример: 150 20",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        return
-    
-    if data == "back_to_categories":
-        sessions.pop(user_id, None)
-        data = load_from_yandex()
-        
-        raw_categories = list(set(
-            item.get('Категории', '') for item in data['nomenclature'] 
-            if item.get('Категории')
-        ))
-        
-        clean_categories = []
-        for cat in raw_categories:
-            if cat and str(cat).strip():
-                clean_cat = str(cat).strip().replace('*', '').replace('_', '').replace('[', '').replace(']', '')
-                if clean_cat:
-                    clean_categories.append(clean_cat)
-        
-        keyboard = []
-        for cat in clean_categories[:10]:
-            keyboard.append([InlineKeyboardButton(cat, callback_data=f"cat_{cat}")])
-        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
+        sessions[user_id] = {
+            'step': 'parameters',
+            'category': category
+        }
         
         await query.edit_message_text(
-            "👋 Производственный калькулятор\n\nВыберите категорию:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            f"📊 *Параметры расчета*\nКатегория: {category}\n\n"
+            f"Введите через пробел:\n"
+            f"`Эффективность (%) Налог (%)`\n\n"
+            f"Пример: `150 20`",
+            parse_mode='Markdown'
         )
         return
 
@@ -280,12 +258,16 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     text = update.message.text
-    logger.info(f"Текст от пользователя {user_id}: {text}, шаг: {session.get('step')}")
+    logger.info(f"Текст от {user_id}: {text}, шаг: {session.get('step')}")
     
+    # Шаг 1: Ввод эффективности и налога
     if session['step'] == 'parameters':
         parts = text.split()
         if len(parts) < 2:
-            await update.message.reply_text("❌ Введите: Эффективность Налог\nПример: 150 20")
+            await update.message.reply_text(
+                "❌ Введите через пробел: Эффективность Налог\n"
+                "Пример: 150 20"
+            )
             return
         
         try:
@@ -295,44 +277,93 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Введите числа")
             return
         
-        session.update({'step': 'product_selection', 'efficiency': efficiency, 'tax': tax})
-        
         data = load_from_yandex()
-        products = [item['Наименование'] for item in data['nomenclature'] 
-                   if item.get('Тип') in ['изделие', 'узел']]
-        products.sort()
+        
+        # Получаем изделия для выбранной категории
+        products = []
+        for item in data['nomenclature']:
+            if item.get('Категории') == session['category'] and item.get('Тип') in ['изделие', 'узел']:
+                products.append({
+                    'code': item['Код'],
+                    'name': item['Наименование']
+                })
+        
+        if not products:
+            await update.message.reply_text("❌ Нет изделий в этой категории")
+            return
+        
+        # Сохраняем в сессию
+        session.update({
+            'step': 'product_selection',
+            'efficiency': efficiency,
+            'tax': tax,
+            'products': products
+        })
+        
+        # Показываем список изделий
+        products_list = "\n".join([f"{i+1}. {p['name']}" for i, p in enumerate(products[:20])])
+        if len(products) > 20:
+            products_list += f"\n... и еще {len(products) - 20}"
         
         await update.message.reply_text(
-            f"✅ Параметры сохранены\nЭффективность: {efficiency:.0f}%\nНалог: {tax:.0f}%\n\n"
-            f"📋 Введите название изделия или узла:"
+            f"✅ Параметры сохранены\n"
+            f"Эффективность: {efficiency:.0f}%\n"
+            f"Налог: {tax:.0f}%\n\n"
+            f"📋 *Доступные изделия:*\n{products_list}\n\n"
+            f"Введите **номер** изделия из списка:",
+            parse_mode='Markdown'
         )
         return
     
+    # Шаг 2: Выбор изделия по номеру
     elif session['step'] == 'product_selection':
+        try:
+            idx = int(text) - 1
+            if idx < 0 or idx >= len(session['products']):
+                raise ValueError
+            selected = session['products'][idx]
+        except:
+            await update.message.reply_text(
+                f"❌ Введите число от 1 до {len(session['products'])}"
+            )
+            return
+        
+        # Получаем полные данные изделия
         data = load_from_yandex()
-        product = find_product(text, data['nomenclature'])
+        product = None
+        for item in data['nomenclature']:
+            if item['Код'] == selected['code']:
+                product = item
+                break
         
         if not product:
-            await update.message.reply_text(f"❌ Изделие не найдено")
+            await update.message.reply_text("❌ Ошибка получения данных")
             return
         
         session.update({
-            'step': 'quantities',
+            'step': 'prices',
             'product': product,
             'output_per_drawing': int(product.get('Кратность', 1))
         })
         
         await update.message.reply_text(
-            f"✅ Выбрано: {product['Наименование']}\n"
+            f"✅ Выбрано: *{product['Наименование']}*\n"
             f"Кратность: {product.get('Кратность', 1)}\n\n"
-            f"💰 Введите через пробел:\nРыночная цена Стоимость чертежа\nПример: 3200000 6900000"
+            f"💰 Введите через пробел:\n"
+            f"`Рыночная цена Стоимость чертежа`\n\n"
+            f"Пример: `3200000 6900000`",
+            parse_mode='Markdown'
         )
         return
     
-    elif session['step'] == 'quantities':
+    # Шаг 3: Ввод цен
+    elif session['step'] == 'prices':
         parts = text.split()
         if len(parts) < 2:
-            await update.message.reply_text("❌ Введите две цены")
+            await update.message.reply_text(
+                "❌ Введите две цены через пробел\n"
+                "Пример: 3200000 6900000"
+            )
             return
         
         try:
@@ -342,12 +373,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Введите числа")
             return
         
-        session.update({'market_price': market_price, 'drawing_price': drawing_price})
-        await update.message.reply_text("📦 Введите количество продукции (шт):")
-        session['step'] = 'final_calculation'
+        # Запрашиваем количество
+        session.update({
+            'market_price': market_price,
+            'drawing_price': drawing_price,
+            'step': 'quantity'
+        })
+        
+        await update.message.reply_text(
+            f"📦 Введите количество продукции (шт):"
+        )
         return
     
-    elif session['step'] == 'final_calculation':
+    # Шаг 4: Ввод количества и расчет материалов
+    elif session['step'] == 'quantity':
         try:
             qty = float(text)
         except ValueError:
@@ -364,28 +403,88 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         drawings_needed = int(qty // output)
         data = load_from_yandex()
         
-        materials_dict = collect_materials(product['Код'], 1, data['nomenclature'], data['specifications'])
-        materials_list, material_cost = calculate_materials(materials_dict, qty, drawings_needed, session['efficiency'])
+        # Собираем материалы
+        materials_dict = collect_materials(
+            product['Код'], 1, 
+            data['nomenclature'], 
+            data['specifications']
+        )
         
-        # Очищаем цену производства от " ISK" и пробелов
-        price_str = str(product.get('Цена производства', '0'))
+        if not materials_dict:
+            await update.message.reply_text("❌ Нет материалов для этого изделия")
+            return
+        
+        # Рассчитываем количества (без цен)
+        materials_list = []
+        i = 1
+        for m in materials_dict.values():
+            raw = (m['baseQty'] / 1.5) * (session['efficiency'] / 100)
+            rounded = (raw * 10 // 1 + 1) / 10 if raw * 10 % 1 > 0 else raw
+            final_qty = rounded * drawings_needed
+            materials_list.append({
+                'number': i,
+                'name': m['name'],
+                'qty': final_qty
+            })
+            i += 1
+        
+        # Сохраняем в сессию
+        session.update({
+            'step': 'material_prices',
+            'qty': qty,
+            'drawings_needed': drawings_needed,
+            'materials_list': materials_list
+        })
+        
+        # Запрашиваем цены на материалы
+        await update.message.reply_text(
+            format_materials_for_input(materials_list),
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Шаг 5: Ввод цен на материалы
+    elif session['step'] == 'material_prices':
+        parts = text.split()
+        if len(parts) < len(session['materials_list']):
+            await update.message.reply_text(
+                f"❌ Введите {len(session['materials_list'])} цен через пробел"
+            )
+            return
+        
+        try:
+            prices = [float(p) for p in parts[:len(session['materials_list'])]]
+        except ValueError:
+            await update.message.reply_text("❌ Введите числа")
+            return
+        
+        # Создаем словарь цен
+        material_prices = {}
+        for i, m in enumerate(session['materials_list']):
+            material_prices[m['name']] = prices[i]
+            m['price'] = prices[i]
+            m['cost'] = m['qty'] * prices[i]
+        
+        # Рассчитываем итоги
+        material_cost = sum(m['qty'] * m['price'] for m in session['materials_list'])
+        
+        # Цена производства
+        price_str = str(session['product'].get('Цена производства', '0'))
         price_clean = price_str.replace(' ISK', '').replace(' ', '')
         try:
             prod_cost_per_unit = float(price_clean) if price_clean else 0
         except:
             prod_cost_per_unit = 0
-            logger.error(f"Не удалось преобразовать цену: {price_str}")
         
-        prod_cost = prod_cost_per_unit * drawings_needed
-        drawing_cost = session['drawing_price'] * drawings_needed
+        prod_cost = prod_cost_per_unit * session['drawings_needed']
+        drawing_cost = session['drawing_price'] * session['drawings_needed']
         total = material_cost + prod_cost + drawing_cost
-        revenue = session['market_price'] * qty
+        revenue = session['market_price'] * session['qty']
         profit_before = revenue - total
         tax = profit_before * session['tax'] / 100 if profit_before > 0 else 0
         profit_after = profit_before - tax
         
         result = {
-            'qty': qty,
             'materialCost': material_cost,
             'prodCost': prod_cost,
             'drawingCost': drawing_cost,
@@ -393,20 +492,23 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'revenue': revenue,
             'profitBeforeTax': profit_before,
             'tax': tax,
-            'profitAfterTax': profit_after,
-            'taxRate': session['tax']
+            'profitAfterTax': profit_after
         }
         
+        # Отправляем результат
         await update.message.reply_text(
-            f"📊 РЕЗУЛЬТАТЫ РАСЧЕТА\n\n"
-            f"Изделие: {product['Наименование']}\n"
-            f"Количество: {qty:.0f} шт\n"
-            f"Эффективность: {session['efficiency']:.0f}%\n"
-            f"Налог: {session['tax']:.0f}%\n\n"
-            f"Материалы:\n{format_materials(materials_list)}\n"
-            f"{format_money_block(result)}"
+            format_results(
+                session['product']['Наименование'],
+                session['qty'],
+                session['efficiency'],
+                session['tax'],
+                session['materials_list'],
+                result
+            ),
+            parse_mode='Markdown'
         )
         
+        # Очищаем сессию
         sessions.pop(user_id, None)
         return
 
