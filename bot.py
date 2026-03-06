@@ -81,31 +81,70 @@ async def check_access(update: Update) -> bool:
 # ==================== ПОИСК ИЗДЕЛИЯ ПО КОДУ ====================
 def find_product_by_code(code, nomenclature):
     for item in nomenclature:
-        if item.get('Код') == code:
+        item_code = item.get('Код') or item.get('code') or item.get('код')
+        if item_code and str(item_code) == str(code):
             return item
     return None
 
 # ==================== РЕКУРСИВНЫЙ СБОР МАТЕРИАЛОВ ====================
 def collect_materials(product_code, multiplier, nomenclature, specifications):
+    """Рекурсивный сбор материалов с поддержкой разных названий полей"""
     materials = {}
+    logger.info(f"Сбор материалов для продукта: {product_code}")
+    
+    # Покажем пример структуры для отладки
+    if specifications:
+        logger.info(f"Пример спецификации: {specifications[0]}")
+        logger.info(f"Ключи в спецификации: {list(specifications[0].keys())}")
     
     def explode(code, mult):
+        logger.info(f"Обрабатываем узел: {code}, множитель: {mult}")
+        found = 0
+        
         for spec in specifications:
-            if str(spec.get('Родитель')) == str(code):
+            # Пробуем разные возможные названия полей
+            parent = spec.get('Родитель') or spec.get('parent') or spec.get('родитель')
+            child = spec.get('Потомок') or spec.get('child') or spec.get('потомок')
+            quantity = spec.get('Количество') or spec.get('quantity') or spec.get('количество', 0)
+            
+            if parent and str(parent) == str(code):
+                found += 1
+                logger.info(f"  Найдена спецификация: {parent} -> {child}, кол-во: {quantity}")
+                
+                # Ищем элемент в номенклатуре
+                found_item = None
                 for item in nomenclature:
-                    if str(item.get('Код')) == str(spec.get('Потомок')):
-                        if item.get('Тип') == 'материал':
-                            if item['Код'] not in materials:
-                                materials[item['Код']] = {
-                                    'name': item['Наименование'],
-                                    'baseQty': 0
-                                }
-                            qty = float(spec.get('Количество', 0)) * mult
-                            materials[item['Код']]['baseQty'] += qty
-                        elif item.get('Тип') == 'узел':
-                            explode(item['Код'], mult * float(spec.get('Количество', 0)))
+                    item_code = item.get('Код') or item.get('code') or item.get('код')
+                    if item_code and str(item_code) == str(child):
+                        found_item = item
+                        break
+                
+                if found_item:
+                    item_type = str(found_item.get('Тип') or found_item.get('type') or found_item.get('тип', '')).lower()
+                    item_name = found_item.get('Наименование') or found_item.get('name') or found_item.get('наименование', 'Неизвестно')
+                    
+                    if 'материал' in item_type:
+                        if child not in materials:
+                            materials[child] = {
+                                'name': item_name,
+                                'baseQty': 0
+                            }
+                        qty = float(quantity) * mult
+                        materials[child]['baseQty'] += qty
+                        logger.info(f"    Материал: {item_name}, добавляем {qty}")
+                    elif 'узел' in item_type:
+                        logger.info(f"    Узел: {item_name}, углубляемся")
+                        explode(child, mult * float(quantity))
+                    else:
+                        logger.info(f"    Пропускаем (тип: {item_type})")
+                else:
+                    logger.info(f"  Элемент с кодом {child} не найден в номенклатуре")
+        
+        if found == 0:
+            logger.info(f"  Для {code} спецификаций не найдено")
     
     explode(product_code, multiplier)
+    logger.info(f"Собрано материалов: {len(materials)}")
     return materials
 
 # ==================== РАСЧЕТ МАТЕРИАЛОВ ====================
@@ -210,14 +249,12 @@ async def show_products_page(update_or_query, session, edit: bool = False):
     keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
     
     if edit:
-        # Редактируем существующее сообщение (пришло из callback query)
         await update_or_query.message.edit_text(
             text,
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
         )
     else:
-        # Отправляем новое сообщение (пришло из текстового сообщения)
         await update_or_query.message.reply_text(
             text,
             reply_markup=InlineKeyboardMarkup(keyboard),
@@ -279,7 +316,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Расчет отменен")
         return
     
-    # Навигация по страницам списка изделий
     if data in ["prev_page", "next_page"]:
         session = sessions.get(user_id)
         if session and session.get('step') == 'product_selection':
@@ -288,11 +324,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 session['product_page'] = session.get('product_page', 0) + 1
             
-            # Передаем edit=True, чтобы редактировать текущее сообщение
             await show_products_page(query, session, edit=True)
         return
     
-    # Возврат к категориям
     if data == "back_to_categories":
         sessions.pop(user_id, None)
         data = load_from_yandex()
@@ -321,7 +355,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Возврат к выбору изделия
     if data == "back_to_products":
         session = sessions.get(user_id)
         if session and session.get('step') in ['prices', 'quantity', 'material_prices']:
@@ -337,7 +370,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'category': category
         }
         
-        # Добавляем кнопку "Назад к категориям"
         keyboard = [[InlineKeyboardButton("🔙 К категориям", callback_data="back_to_categories")]]
         
         await query.edit_message_text(
@@ -364,13 +396,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     logger.info(f"Текст от {user_id}: {text}, шаг: {session.get('step')}")
     
-    # Шаг 1: Ввод эффективности и налога
     if session['step'] == 'parameters':
         parts = text.split()
         if len(parts) < 2:
             await update.message.reply_text(
-                "❌ Введите через пробел: Эффективность Налог\n"
-                "Пример: 150 20"
+                "❌ Введите через пробел: Эффективность Налог\nПример: 150 20"
             )
             return
         
@@ -383,10 +413,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         data = load_from_yandex()
         
-        # Получаем изделия для выбранной категории
         products = []
         for item in data['nomenclature']:
-            if item.get('Категории') == session['category'] and item.get('Тип') in ['изделие', 'узел']:
+            category = item.get('Категории')
+            item_type = str(item.get('Тип') or '').lower()
+            if category == session['category'] and ('изделие' in item_type or 'узел' in item_type):
                 products.append({
                     'code': item['Код'],
                     'name': item['Наименование']
@@ -396,7 +427,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Нет изделий в этой категории")
             return
         
-        # Сохраняем в сессию
         session.update({
             'step': 'product_selection',
             'efficiency': efficiency,
@@ -405,11 +435,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'product_page': 0
         })
         
-        # Показываем первую страницу списка изделий
         await show_products_page(update, session, edit=False)
         return
     
-    # Шаг 2: Выбор изделия по номеру
     elif session['step'] == 'product_selection':
         try:
             idx = int(text) - 1
@@ -422,7 +450,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # Получаем полные данные изделия
         data = load_from_yandex()
         product = None
         for item in data['nomenclature']:
@@ -434,15 +461,25 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Ошибка получения данных")
             return
         
+        # Получаем кратность с проверкой
+        try:
+            multiplicity = product.get('Кратность', 1)
+            if multiplicity is None or multiplicity == '' or (isinstance(multiplicity, float) and pd.isna(multiplicity)):
+                multiplicity = 1
+            else:
+                multiplicity = int(float(multiplicity))
+        except:
+            multiplicity = 1
+        
         session.update({
             'step': 'prices',
             'product': product,
-            'output_per_drawing': int(product.get('Кратность', 1))
+            'output_per_drawing': multiplicity
         })
         
         await update.message.reply_text(
             f"✅ Выбрано: *{product['Наименование']}*\n"
-            f"Кратность: {product.get('Кратность', 1)}\n\n"
+            f"Кратность: {multiplicity}\n\n"
             f"💰 Введите через пробел:\n"
             f"`Рыночная цена Стоимость чертежа`\n\n"
             f"Пример: `3200000 6900000`",
@@ -450,14 +487,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Шаг 3: Ввод цен
     elif session['step'] == 'prices':
         parts = text.split()
         if len(parts) < 2:
             keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data="back_to_products")]]
             await update.message.reply_text(
-                "❌ Введите две цены через пробел\n"
-                "Пример: 3200000 6900000",
+                "❌ Введите две цены через пробел\nПример: 3200000 6900000",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
             return
@@ -484,7 +519,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Шаг 4: Ввод количества и расчет материалов
     elif session['step'] == 'quantity':
         try:
             qty = float(text)
@@ -510,7 +544,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         drawings_needed = int(qty // output)
         data = load_from_yandex()
         
-        # Собираем материалы
         materials_dict = collect_materials(
             product['Код'], 1, 
             data['nomenclature'], 
@@ -521,7 +554,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Нет материалов для этого изделия")
             return
         
-        # Рассчитываем количества (без цен)
         materials_list = []
         i = 1
         for m in materials_dict.values():
@@ -535,7 +567,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             })
             i += 1
         
-        # Сохраняем в сессию
         session.update({
             'step': 'material_prices',
             'qty': qty,
@@ -543,14 +574,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'materials_list': materials_list
         })
         
-        # Запрашиваем цены на материалы
         await update.message.reply_text(
             format_materials_for_input(materials_list),
             parse_mode='Markdown'
         )
         return
     
-    # Шаг 5: Ввод цен на материалы
     elif session['step'] == 'material_prices':
         parts = text.split()
         if len(parts) < len(session['materials_list']):
@@ -571,17 +600,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # Создаем словарь цен
-        material_prices = {}
         for i, m in enumerate(session['materials_list']):
-            material_prices[m['name']] = prices[i]
             m['price'] = prices[i]
             m['cost'] = m['qty'] * prices[i]
         
-        # Рассчитываем итоги
         material_cost = sum(m['qty'] * m['price'] for m in session['materials_list'])
         
-        # Цена производства
         price_str = str(session['product'].get('Цена производства', '0'))
         price_clean = price_str.replace(' ISK', '').replace(' ', '')
         try:
@@ -608,7 +632,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'profitAfterTax': profit_after
         }
         
-        # Отправляем результат
         await update.message.reply_text(
             format_results(
                 session['product']['Наименование'],
@@ -621,7 +644,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
         
-        # Очищаем сессию
         sessions.pop(user_id, None)
         return
 
