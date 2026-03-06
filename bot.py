@@ -21,28 +21,33 @@ sessions = {}
 
 # ==================== ЗАГРУЗКА С ЯНДЕКС.ДИСКА ====================
 def load_from_yandex():
-    """Загружает Excel-файл с Яндекс.Диска и парсит листы"""
+    """Загружает Excel-файл с Google Диска"""
     global cached_data, last_update
     
-    current_time = time.time()
-    if cached_data and (current_time - last_update) < CACHE_TTL:
-        logger.info("Используем кэшированные данные")
+    if cached_data and (time.time() - last_update) < CACHE_TTL:
         return cached_data
-    
-    if not YANDEX_TABLE_URL:
-        logger.error("YANDEX_TABLE_URL не задан")
-        return {'nomenclature': [], 'specifications': []}
-    
+
     try:
-        logger.info(f"Загрузка с Яндекс.Диска: {YANDEX_TABLE_URL}")
-        
-        # Добавляем /download к ссылке для прямого скачивания
-        download_url = YANDEX_TABLE_URL + "/download"
-        response = requests.get(download_url, timeout=30)
-        
+        logger.info(f"Загрузка файла: {YANDEX_TABLE_URL}")
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        response = requests.get(YANDEX_TABLE_URL, headers=headers, timeout=30)
+
         if response.status_code != 200:
-            logger.error(f"Ошибка загрузки: HTTP {response.status_code}")
+            logger.error(f"Ошибка HTTP: {response.status_code}")
             return {'nomenclature': [], 'specifications': []}
+
+        workbook = pd.ExcelFile(BytesIO(response.content))
+        nomenclature = pd.read_excel(workbook, sheet_name='Номенклатура').to_dict('records')
+        specifications = pd.read_excel(workbook, sheet_name='Спецификации').to_dict('records')
+
+        cached_data = {'nomenclature': nomenclature, 'specifications': specifications}
+        last_update = time.time()
+        logger.info(f"Загружено: номенклатура {len(nomenclature)} записей")
+        return cached_data
+
+    except Exception as e:
+        logger.error(f"Ошибка загрузки: {e}")
+        return {'nomenclature': [], 'specifications': []}
         
         # Читаем Excel
         workbook = pd.ExcelFile(BytesIO(response.content))
