@@ -934,64 +934,301 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             })
             await show_products_page(update, session, edit=False)
             return
-     # Шаг 2: Выбор изделия (для обоих режимов)
-elif session['step'] == 'product_selection' or session['step'] == 'automatic_product_selection':
-    try:
-        idx = int(text) - 1
-        if idx < 0 or idx >= len(session['products']):
-            raise ValueError
-        selected = session['products'][idx]
-    except:
-        await update.message.reply_text(f"❌ Введите число от 1 до {len(session['products'])}")
-        return
     
-    is_automatic = session.get('step') == 'automatic_product_selection'
-    
-    # Получаем полные данные изделия из номенклатуры
-    data = load_from_yandex()
-    product = None
-    for item in data['nomenclature']:
-        if item['Код'] == selected['code']:
-            product = item
-            break
-    
-    if not product:
-        await update.message.reply_text("❌ Ошибка получения данных")
-        return
-    
-    # Получаем кратность с проверкой
-    try:
-        multiplicity = product.get('Кратность', 1)
-        if multiplicity is None or multiplicity == '' or (isinstance(multiplicity, float) and pd.isna(multiplicity)):
+    # Шаг 2: Выбор изделия (для обоих режимов)
+    elif session['step'] == 'product_selection' or session['step'] == 'automatic_product_selection':
+        try:
+            idx = int(text) - 1
+            if idx < 0 or idx >= len(session['products']):
+                raise ValueError
+            selected = session['products'][idx]
+        except:
+            await update.message.reply_text(f"❌ Введите число от 1 до {len(session['products'])}")
+            return
+        
+        is_automatic = session.get('step') == 'automatic_product_selection'
+        
+        # Получаем полные данные изделия из номенклатуры
+        data = load_from_yandex()
+        product = None
+        for item in data['nomenclature']:
+            if item['Код'] == selected['code']:
+                product = item
+                break
+        
+        if not product:
+            await update.message.reply_text("❌ Ошибка получения данных")
+            return
+        
+        # Получаем кратность с проверкой
+        try:
+            multiplicity = product.get('Кратность', 1)
+            if multiplicity is None or multiplicity == '' or (isinstance(multiplicity, float) and pd.isna(multiplicity)):
+                multiplicity = 1
+            else:
+                multiplicity = int(float(multiplicity))
+        except:
             multiplicity = 1
+        
+        # Сохраняем выбранное изделие и переходим к следующему шагу
+        if is_automatic:
+            session.update({
+                'step': 'automatic_quantity',
+                'product': product,
+                'output_per_drawing': multiplicity
+            })
         else:
-            multiplicity = int(float(multiplicity))
-    except:
-        multiplicity = 1
+            session.update({
+                'step': 'prices',
+                'product': product,
+                'output_per_drawing': multiplicity
+            })
+        
+        saved_price = get_drawing_price(product['Код'])
+        price_text = f"✅ Выбрано: *{product['Наименование']}*\nКратность: {multiplicity}\n\n"
+        price_text += f"💰 Введите через пробел:\n`Рыночная цена Стоимость чертежа`\n\n"
+        if saved_price > 0:
+            price_text += f"*(сохранённая стоимость чертежа: {format_number(saved_price)} ISK)*\n"
+        price_text += f"Пример: `3200000 6900000`"
+        
+        await update.message.reply_text(price_text, parse_mode='Markdown')
+        return
     
-    # Сохраняем выбранное изделие и переходим к следующему шагу
-    if is_automatic:
+    # Шаг 3: Ввод цен (обычный режим)
+    elif session['step'] == 'prices':
+        parts = text.split()
+        if len(parts) < 2:
+            keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data="back_to_products")]]
+            await update.message.reply_text("❌ Введите две цены через пробел\nПример: 3200000 6900000", reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+        
+        try:
+            market_price = float(parts[0])
+            drawing_price = float(parts[1])
+        except ValueError:
+            keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data="back_to_products")]]
+            await update.message.reply_text("❌ Введите числа", reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+        
+        save_drawing_price(session['product']['Код'], drawing_price)
         session.update({
-            'step': 'automatic_quantity',
-            'product': product,
-            'output_per_drawing': multiplicity
+            'market_price': market_price,
+            'drawing_price': drawing_price,
+            'step': 'quantity'
         })
-    else:
+        await update.message.reply_text("📦 Введите количество продукции (шт):")
+        return
+    
+    # Шаг 4: Ввод количества (обычный режим)
+    elif session['step'] == 'quantity':
+        try:
+            qty = float(text)
+        except ValueError:
+            keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data="back_to_products")]]
+            await update.message.reply_text("❌ Введите число", reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+        
+        product = session['product']
+        output = session['output_per_drawing']
+        
+        if qty % output != 0:
+            keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data="back_to_products")]]
+            await update.message.reply_text(f"⚠️ Количество должно быть кратно {output}", reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+        
+        drawings_needed = int(qty // output)
+        data = load_from_yandex()
+        
+        materials_dict = collect_materials(
+            product['Код'], 1,
+            data['nomenclature'],
+            data['specifications']
+        )
+        
+        if not materials_dict:
+            await update.message.reply_text("❌ Нет материалов для этого изделия")
+            return
+        
+        materials_list = []
+        i = 1
+        for m in materials_dict.values():
+            raw = (m['baseQty'] / 1.5) * (session['efficiency'] / 100)
+            rounded = (raw * 10 // 1 + 1) / 10 if raw * 10 % 1 > 0 else raw
+            final_qty = rounded * drawings_needed
+            materials_list.append({
+                'number': i,
+                'name': m['name'],
+                'qty': final_qty
+            })
+            i += 1
+        
+        saved_prices = get_all_material_prices()
         session.update({
-            'step': 'prices',
-            'product': product,
-            'output_per_drawing': multiplicity
+            'step': 'material_prices',
+            'qty': qty,
+            'drawings_needed': drawings_needed,
+            'materials_list': materials_list
         })
+        
+        await update.message.reply_text(
+            format_materials_for_input(materials_list, saved_prices),
+            parse_mode='Markdown'
+        )
+        return
     
-    saved_price = get_drawing_price(product['Код'])
-    price_text = f"✅ Выбрано: *{product['Наименование']}*\nКратность: {multiplicity}\n\n"
-    price_text += f"💰 Введите через пробел:\n`Рыночная цена Стоимость чертежа`\n\n"
-    if saved_price > 0:
-        price_text += f"*(сохранённая стоимость чертежа: {format_number(saved_price)} ISK)*\n"
-    price_text += f"Пример: `3200000 6900000`"
+    # Шаг 5: Ввод цен на материалы (обычный режим)
+    elif session['step'] == 'material_prices':
+        parts = text.split()
+        if len(parts) < len(session['materials_list']):
+            keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data="back_to_products")]]
+            await update.message.reply_text(f"❌ Введите {len(session['materials_list'])} цен через пробел", reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+        
+        try:
+            prices = [float(p) for p in parts[:len(session['materials_list'])]]
+        except ValueError:
+            keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data="back_to_products")]]
+            await update.message.reply_text("❌ Введите числа", reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+        
+        for i, m in enumerate(session['materials_list']):
+            m['price'] = prices[i]
+            m['cost'] = m['qty'] * prices[i]
+            save_material_price(m['name'], prices[i])
+        
+        material_cost = sum(m['qty'] * m['price'] for m in session['materials_list'])
+        
+        price_str = str(session['product'].get('Цена производства', '0')).replace(' ISK', '').replace(' ', '')
+        try:
+            prod_cost = float(price_str) if price_str else 0
+        except:
+            prod_cost = 0
+        prod_cost = prod_cost * session['drawings_needed']
+        
+        drawing_cost = session['drawing_price'] * session['drawings_needed']
+        total = material_cost + prod_cost + drawing_cost
+        revenue = session['market_price'] * session['qty']
+        profit_before = revenue - total
+        tax = profit_before * session['tax'] / 100 if profit_before > 0 else 0
+        profit_after = profit_before - tax
+        
+        result = {
+            'materialCost': material_cost,
+            'prodCost': prod_cost,
+            'drawingCost': drawing_cost,
+            'totalCost': total,
+            'revenue': revenue,
+            'profitBeforeTax': profit_before,
+            'tax': tax,
+            'profitAfterTax': profit_after
+        }
+        
+        await update.message.reply_text(
+            format_results(
+                session['product']['Наименование'],
+                session['qty'],
+                session['efficiency'],
+                session['tax'],
+                session['materials_list'],
+                result
+            ),
+            parse_mode='Markdown'
+        )
+        
+        sessions.pop(user_id, None)
+        bot_lock.release(user_id)
+        return
     
-    await update.message.reply_text(price_text, parse_mode='Markdown')
-    return       
+    # Шаг 4 (автоматический режим): Ввод количества
+    elif session['step'] == 'automatic_quantity':
+        try:
+            qty = float(text)
+        except ValueError:
+            keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data="back_to_products")]]
+            await update.message.reply_text("❌ Введите число", reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+        
+        product = session['product']
+        output = session['output_per_drawing']
+        
+        if qty % output != 0:
+            keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data="back_to_products")]]
+            await update.message.reply_text(f"⚠️ Количество должно быть кратно {output}", reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+        
+        drawings_needed = int(qty // output)
+        data = load_from_yandex()
+        
+        materials_dict = collect_materials(
+            product['Код'], 1,
+            data['nomenclature'],
+            data['specifications']
+        )
+        
+        if not materials_dict:
+            await update.message.reply_text("❌ Нет материалов для этого изделия")
+            return
+        
+        materials_list = []
+        missing_prices = []
+        saved_prices = get_all_material_prices()
+        
+        i = 1
+        for m in materials_dict.values():
+            raw = (m['baseQty'] / 1.5) * (session['efficiency'] / 100)
+            rounded = (raw * 10 // 1 + 1) / 10 if raw * 10 % 1 > 0 else raw
+            final_qty = rounded * drawings_needed
+            materials_list.append({
+                'number': i,
+                'name': m['name'],
+                'qty': final_qty,
+                'price': saved_prices.get(m['name'], 0)
+            })
+            if m['name'] not in saved_prices or saved_prices[m['name']] == 0:
+                missing_prices.append(m['name'])
+            i += 1
+        
+        if missing_prices:
+            session.update({
+                'step': 'automatic_missing_prices',
+                'qty': qty,
+                'drawings_needed': drawings_needed,
+                'materials_list': materials_list,
+                'missing_prices': missing_prices
+            })
+            
+            missing_text = "⚠️ *Для следующих материалов нет цен:*\n\n"
+            for name in missing_prices:
+                missing_text += f"• {name}\n"
+            missing_text += f"\nВведите цены через пробел для этих {len(missing_prices)} материалов:"
+            
+            await update.message.reply_text(missing_text, parse_mode='Markdown')
+        else:
+            await calculate_and_send_result(update, session, materials_list, qty, drawings_needed)
+        return
+    
+    # Шаг 5 (автоматический режим): Ввод недостающих цен
+    elif session['step'] == 'automatic_missing_prices':
+        parts = text.split()
+        if len(parts) < len(session['missing_prices']):
+            await update.message.reply_text(f"❌ Введите {len(session['missing_prices'])} цен через пробел")
+            return
+        
+        try:
+            prices = [float(p) for p in parts[:len(session['missing_prices'])]]
+        except ValueError:
+            await update.message.reply_text("❌ Введите числа")
+            return
+        
+        price_index = 0
+        for m in session['materials_list']:
+            if m['name'] in session['missing_prices']:
+                m['price'] = prices[price_index]
+                save_material_price(m['name'], prices[price_index])
+                price_index += 1
+        
+        await calculate_and_send_result(update, session, session['materials_list'], session['qty'], session['drawings_needed'])
+        return
 
 # ==================== ЗАПУСК ====================
 def main():
