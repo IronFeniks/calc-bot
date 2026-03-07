@@ -16,6 +16,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ==================== ФУНКЦИЯ ДЛЯ УСТАНОВКИ МЕНЮ ====================
+async def post_init(application: Application):
+    """Устанавливает меню с командами после запуска бота"""
+    try:
+        await application.bot.set_my_commands([
+            ("start", "Начать новый расчет"),
+            ("nalog", "Установка налога и эффективности"),
+            ("categories", "Полный расчет по категориям"),
+            ("automatic", "Автоматический расчет"),
+            ("instructions", "Инструкция")
+        ])
+        logger.info("✅ Меню с командами установлено")
+    except Exception as e:
+        logger.error(f"❌ Ошибка установки меню: {e}")
+
 # ==================== БАЗА ДАННЫХ ЦЕН ====================
 PRICES_DB_PATH = 'data/prices.db'
 
@@ -1267,7 +1282,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== ЗАПУСК ====================
 def main():
     init_prices_db()
-    app = Application.builder().token(TOKEN).build()
+    
+    # Создаем приложение с post_init
+    app = Application.builder().token(TOKEN).post_init(post_init).build()
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("nalog", nalog_command))
@@ -1278,25 +1295,9 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     
-    # Устанавливаем кнопку меню с командами
-    async def setup_menu():
-        try:
-            await app.bot.set_my_commands([
-                ("start", "Начать новый расчет"),
-                ("nalog", "Установка налога и эффективности"),
-                ("categories", "Полный расчет по категориям"),
-                ("automatic", "Автоматический расчет"),
-                ("instructions", "Инструкция")
-            ])
-            logger.info("✅ Меню с командами установлено")
-        except Exception as e:
-            logger.error(f"❌ Ошибка установки меню: {e}")
-    
-    # Запускаем установку меню
-    import asyncio
-    asyncio.create_task(setup_menu())
-    
     logger.info("✅ Бот запущен с новыми командами и защитой от чужих кнопок")
+    
+    # Запускаем бота
     app.run_polling()
 
 if __name__ == "__main__":
