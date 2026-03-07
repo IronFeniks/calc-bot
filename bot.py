@@ -105,7 +105,7 @@ class UserLock:
         self.first_name = None
     
     def acquire(self, user_id, username=None, first_name=None):
-        if self.current_user is None or (time.time() - self.lock_time) > 600:
+        if self.current_user is None or (time.time() - self.lock_time) > 300:  # 5 минут
             self.current_user = user_id
             self.lock_time = time.time()
             self.username = username
@@ -131,6 +131,16 @@ class UserLock:
                 'first_name': self.first_name
             }
         return None
+    
+    def check_timeout(self):
+        """Проверяет, не истек ли таймаут"""
+        if self.current_user and (time.time() - self.lock_time) > 300:
+            logger.info(f"⏰ Таймаут для пользователя {self.current_user}")
+            self.current_user = None
+            self.username = None
+            self.first_name = None
+            return True
+        return False
 
 bot_lock = UserLock()
 
@@ -352,25 +362,53 @@ async def show_products_page(update_or_query, session, edit: bool = False):
     else:
         await update_or_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-async def show_materials_page(update_or_query, session, edit: bool = False):
+async def show_materials_page(update_or_query, session, edit: bool = False, page: int = 0):
     """Показывает страницу с материалами и кнопками управления"""
     materials = session['materials_list']
     user_id = session.get('user_id')
     
-    text = f"📋 *МАТЕРИАЛЫ ДЛЯ {session['product']['Наименование']}*\n\n"
-    text += format_materials_for_display(materials)
+    items_per_page = 10
+    total_pages = (len(materials) + items_per_page - 1) // items_per_page
     
-    keyboard = [
-        [InlineKeyboardButton("🔙 Назад", callback_data=f"user_{user_id}_back_to_products")],
-        [InlineKeyboardButton("✏️ Ввод цен", callback_data=f"user_{user_id}_price_input")],
-        [InlineKeyboardButton("🤖 Автоматически", callback_data=f"user_{user_id}_auto_prices")],
-        [InlineKeyboardButton("❌ Отменить", callback_data="cancel")]
-    ]
+    start_idx = page * items_per_page
+    end_idx = min(start_idx + items_per_page, len(materials))
+    
+    text = f"📋 *МАТЕРИАЛЫ ДЛЯ {session['product']['Наименование']}*\n\n"
+    
+    if total_pages > 1:
+        text += f"*Страница {page + 1} из {total_pages}*\n\n"
+    
+    for i in range(start_idx, end_idx):
+        m = materials[i]
+        price_str = f"{format_number(m['price'])} ISK" if m['price'] > 0 else "не установлена"
+        text += f"{m['number']}. {m['name']}: нужно {format_number(m['qty'])} шт | цена: {price_str}\n"
+    
+    # Создаем клавиатуру
+    keyboard = []
+    
+    # Кнопки навигации, если материалов больше 15 и больше одной страницы
+    if len(materials) > 15 and total_pages > 1:
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton("◀️ Назад", callback_data=f"user_{user_id}_materials_page_{page-1}"))
+        if page < total_pages - 1:
+            nav_row.append(InlineKeyboardButton("Вперед ▶️", callback_data=f"user_{user_id}_materials_page_{page+1}"))
+        if nav_row:
+            keyboard.append(nav_row)
+    
+    # Основные кнопки действий
+    keyboard.append([InlineKeyboardButton("🔙 Назад к выбору изделия", callback_data=f"user_{user_id}_back_to_products")])
+    keyboard.append([InlineKeyboardButton("✏️ Ввод цен", callback_data=f"user_{user_id}_price_input")])
+    keyboard.append([InlineKeyboardButton("🤖 Автоматически", callback_data=f"user_{user_id}_auto_prices")])
+    keyboard.append([InlineKeyboardButton("❌ Отменить", callback_data="cancel")])
     
     if edit:
         await update_or_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     else:
         await update_or_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    
+    # Сохраняем текущую страницу в сессии
+    session['materials_page'] = page
 
 # ==================== ОБРАБОТЧИКИ КОМАНД ====================
 
@@ -459,6 +497,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     user_id = query.from_user.id
+    
+    # Проверяем таймаут
+    if bot_lock.check_timeout():
+        sessions.pop(user_id, None)
+        await query.edit_message_text("⏰ *Сессия завершена из-за бездействия*\n\nИспользуйте /start для нового расчета", parse_mode='Markdown')
+        return
+    
     data = query.data
     
     # Проверяем, что callback data содержит ID пользователя
@@ -669,12 +714,110 @@ async def continue_to_result(update_or_query, session):
         ]
     ]
     
+    # Сохраняем результат в сессии для возврата из пояснений
+    session['last_result'] = result_text
+    session['last_keyboard'] = keyboard
+    
     if hasattr(update_or_query, 'message'):
         await update_or_query.message.reply_text(result_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     else:
         await update_or_query.edit_message_text(result_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+# ==================== ДОПОЛНИТЕЛЬНЫЕ ОБРАБОТЧИКИ КНОПОК ====================
+async def button_handler_extended(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
     
-    # Не очищаем сессию, чтобы можно было сделать "Та же категория"
+    user_id = query.from_user.id
+    
+    # Проверяем таймаут
+    if bot_lock.check_timeout():
+        sessions.pop(user_id, None)
+        await query.edit_message_text("⏰ *Сессия завершена из-за бездействия*\n\nИспользуйте /start для нового расчета", parse_mode='Markdown')
+        return
+    
+    data = query.data
+    
+    if not data.startswith(f"user_{user_id}_"):
+        return
+    
+    clean_data = data.replace(f"user_{user_id}_", "")
+    
+    if clean_data == "restart":
+        # Полностью новый расчет
+        bot_lock.release(user_id)
+        sessions.pop(user_id, None)
+        # Создаем новый update для вызова start
+        new_update = Update(update.update_id, message=query.message)
+        new_update.effective_user = query.from_user
+        new_update.effective_chat = query.message.chat
+        await start(new_update, context)
+        return
+    
+    if clean_data == "same_category":
+        # Новый расчет в той же категории
+        session = sessions.get(user_id)
+        if session:
+            # Очищаем данные, но сохраняем категорию
+            new_session = {
+                'user_id': user_id,
+                'category': session['category'],
+                'step': 'parameters'
+            }
+            sessions[user_id] = new_session
+            keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]
+            await query.edit_message_text(
+                f"📊 *Параметры для категории {session['category']}*\n\n"
+                f"Введите через пробел:\n"
+                f"`Эффективность (%) Налог (%)`\n\n"
+                f"Пример: `150 20`",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+        return
+    
+    if clean_data == "copy":
+        # Копирование результатов
+        await query.answer("📋 Результаты скопированы в буфер обмена (имитация)", show_alert=True)
+        return
+    
+    if clean_data == "explain":
+        # Показать пояснение
+        keyboard = [[InlineKeyboardButton("🔙 Назад к результатам", callback_data=f"user_{user_id}_back_to_result")]]
+        await query.edit_message_text(
+            get_explanation_text(),
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+        return
+    
+    if clean_data == "back_to_result":
+        # Вернуться к результатам
+        session = sessions.get(user_id)
+        if session and 'last_result' in session:
+            keyboard = [
+                [
+                    InlineKeyboardButton("🔄 Новый расчет", callback_data=f"user_{user_id}_restart"),
+                    InlineKeyboardButton("📂 Та же категория", callback_data=f"user_{user_id}_same_category")
+                ],
+                [
+                    InlineKeyboardButton("📋 Копировать", callback_data=f"user_{user_id}_copy"),
+                    InlineKeyboardButton("📖 Пояснить по цифрам", callback_data=f"user_{user_id}_explain")
+                ]
+            ]
+            await query.edit_message_text(
+                session['last_result'],
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+        return
+    
+    if clean_data.startswith("materials_page_"):
+        page = int(clean_data.replace("materials_page_", ""))
+        session = sessions.get(user_id)
+        if session:
+            await show_materials_page(query, session, edit=True, page=page)
+        return
 
 # ==================== ОБРАБОТЧИК ТЕКСТОВЫХ СООБЩЕНИЙ ====================
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -682,6 +825,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     user_id = update.effective_user.id
+    
+    # Проверяем таймаут
+    if bot_lock.check_timeout():
+        sessions.pop(user_id, None)
+        await update.message.reply_text("⏰ *Сессия завершена из-за бездействия*\n\nИспользуйте /start для нового расчета", parse_mode='Markdown')
+        return
+    
     session = sessions.get(user_id)
     
     if not session:
@@ -693,6 +843,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name = lock_info['first_name'] or f"@{lock_info['username']}" if lock_info['username'] else f"ID {lock_info['user_id']}"
         await update.message.reply_text(f"⏳ *Бот занят*\n\nСейчас расчёты выполняет: *{name}*", parse_mode='Markdown')
         return
+    
+    # Обновляем время активности
+    bot_lock.lock_time = time.time()
     
     text = update.message.text
     logger.info(f"Текст от {user_id}: {text}, шаг: {session.get('step')}")
@@ -863,7 +1016,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'materials_list': materials_list
         })
         
-        await show_materials_page(update, session, edit=False)
+        await show_materials_page(update, session, edit=False, page=0)
         return
     
     # Обработка пошагового ввода цен материалов
@@ -886,75 +1039,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await process_next_material_price(update, session)
         return
 
-# ==================== ДОПОЛНИТЕЛЬНЫЕ ОБРАБОТЧИКИ ====================
-async def button_handler_extended(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Дополнительные обработчики кнопок (вынесено для читаемости)"""
-    query = update.callback_query
-    user_id = query.from_user.id
-    data = query.data
-    
-    # Очищаем data от префикса с user_id
-    if data.startswith(f"user_{user_id}_"):
-        clean_data = data.replace(f"user_{user_id}_", "")
-    else:
-        return
-    
-    if clean_data == "restart":
-        # Полностью новый расчет
-        bot_lock.release(user_id)
-        sessions.pop(user_id, None)
-        await start(update, context)
-        return
-    
-    if clean_data == "same_category":
-        # Новый расчет в той же категории
-        session = sessions.get(user_id)
-        if session:
-            # Очищаем данные, но сохраняем категорию
-            new_session = {
-                'user_id': user_id,
-                'category': session['category'],
-                'step': 'parameters'
-            }
-            sessions[user_id] = new_session
-            keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]
-            await query.edit_message_text(
-                f"📊 *Параметры для категории {session['category']}*\n\n"
-                f"Введите через пробел:\n"
-                f"`Эффективность (%) Налог (%)`\n\n"
-                f"Пример: `150 20`",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode='Markdown'
-            )
-        return
-    
-    if clean_data == "copy":
-        # Копирование результатов
-        await query.answer("📋 Результаты скопированы в буфер обмена (имитация)", show_alert=True)
-        return
-    
-    if clean_data == "explain":
-        # Показать пояснение
-        keyboard = [[InlineKeyboardButton("🔙 Назад к результатам", callback_data=f"user_{user_id}_back_to_result")]]
-        await query.edit_message_text(
-            get_explanation_text(),
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='Markdown'
-        )
-        return
-    
-    if clean_data == "back_to_result":
-        # Вернуться к результатам
-        session = sessions.get(user_id)
-        if session and 'last_result' in session:
-            # Здесь нужно восстановить последний результат
-            await query.edit_message_text(
-                session['last_result'],
-                reply_markup=session['last_keyboard'],
-                parse_mode='Markdown'
-            )
-        return
-
 # ==================== ЗАПУСК ====================
 def main():
     init_prices_db()
@@ -966,7 +1050,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler_extended))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     
-    logger.info("✅ Бот запущен с новой логикой")
+    logger.info("✅ Бот запущен с новой логикой, таймаутом и пагинацией")
     app.run_polling()
 
 if __name__ == "__main__":
