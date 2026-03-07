@@ -242,7 +242,7 @@ def format_materials_for_display(materials_list):
     result = ""
     for m in materials_list:
         price_str = f"{format_number(m['price'])} ISK" if m['price'] > 0 else "не установлена"
-        result += f"{m['number']}. {m['name']}: нужно {format_number(m['qty'])} шт | текущая цена: {price_str}\n"
+        result += f"{m['number']}. {m['name']}: нужно {format_number(m['qty'])} шт | цена: {price_str}\n"
     return result
 
 def format_materials_short(materials_list):
@@ -577,26 +577,54 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await process_next_material_price(query, session)
         return
     
+    if clean_data == "price_input_missing":
+        # Ввод только недостающих цен
+        session = sessions.get(user_id)
+        if session:
+            # Создаем список материалов без цен
+            missing_materials = []
+            for i, m in enumerate(session['materials_list']):
+                if m['price'] == 0:
+                    missing_materials.append({
+                        'index': i,
+                        'name': m['name'],
+                        'qty': m['qty']
+                    })
+            
+            session['missing_materials'] = missing_materials
+            session['current_missing_index'] = 0
+            session['step'] = 'price_input_missing'
+            await process_next_missing_price(query, session)
+        return
+    
     if clean_data == "auto_prices":
         # Автоматическая подстановка цен
         session = sessions.get(user_id)
         if session:
             # Подставляем цены из базы
             saved_prices = get_all_material_prices()
-            zero_materials = []
+            materials_with_price = []
+            materials_without_price = []
+            
             for m in session['materials_list']:
                 saved = saved_prices.get(m['name'], 0)
                 m['price'] = saved
-                if saved == 0:
-                    zero_materials.append(m)
+                if saved > 0:
+                    materials_with_price.append(m)
+                else:
+                    materials_without_price.append(m)
             
-            if zero_materials:
-                # Есть материалы с нулевой ценой
-                zero_list = "\n".join([f"{m['number']}. {m['name']} (нужно {format_number(m['qty'])} шт)" for m in zero_materials])
-                text = f"✅ *Цены подставлены автоматически*\n\n*Материалы с нулевой ценой:*\n{zero_list}"
+            if materials_without_price:
+                # Есть материалы без цен
+                without_list = "\n".join([f"{m['number']}. {m['name']} (нужно {format_number(m['qty'])} шт)" for m in materials_without_price])
+                text = f"✅ *Цены подставлены автоматически*\n\n"
+                text += f"*Материалы с ценами:* {len(materials_with_price)} шт\n"
+                text += f"*Материалы без цен:* {len(materials_without_price)} шт\n\n"
+                text += f"*Нужно ввести цены для:*\n{without_list}"
+                
                 keyboard = [
-                    [InlineKeyboardButton("▶️ Продолжить", callback_data=f"user_{user_id}_continue")],
-                    [InlineKeyboardButton("✏️ Ввести недостающие", callback_data=f"user_{user_id}_price_input")],
+                    [InlineKeyboardButton("▶️ Продолжить с имеющимися ценами", callback_data=f"user_{user_id}_continue")],
+                    [InlineKeyboardButton("✏️ Ввести недостающие", callback_data=f"user_{user_id}_price_input_missing")],
                     [InlineKeyboardButton("❌ Отменить", callback_data="cancel")]
                 ]
                 await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -664,6 +692,34 @@ async def process_next_material_price(update_or_query, session):
         await update_or_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     
     session['step'] = 'price_input_waiting'
+
+async def process_next_missing_price(update_or_query, session):
+    """Обрабатывает пошаговый ввод только недостающих цен материалов"""
+    user_id = session['user_id']
+    missing_materials = session.get('missing_materials', [])
+    current = session.get('current_missing_index', 0)
+    
+    if current >= len(missing_materials):
+        # Все недостающие материалы обработаны
+        await continue_to_result(update_or_query, session)
+        return
+    
+    missing = missing_materials[current]
+    material = session['materials_list'][missing['index']]
+    
+    text = f"📦 *Ввод недостающих цен ({current + 1} из {len(missing_materials)})*\n\n"
+    text += f"*{material['name']}*\n"
+    text += f"Необходимое количество: {format_number(material['qty'])} шт\n\n"
+    text += f"Введите цену для {material['name']}:"
+    
+    keyboard = [[InlineKeyboardButton("❌ Отменить", callback_data="cancel")]]
+    
+    if hasattr(update_or_query, 'message'):
+        await update_or_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    else:
+        await update_or_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    
+    session['step'] = 'price_input_missing_waiting'
 
 async def continue_to_result(update_or_query, session):
     """Переход к финальному расчету"""
@@ -755,8 +811,9 @@ async def button_handler_extended(update: Update, context: ContextTypes.DEFAULT_
         # Полностью новый расчет
         bot_lock.release(user_id)
         sessions.pop(user_id, None)
-        # Создаем новый update для вызова start
-        await query.edit_message_text("🔄 *Начинаем новый расчет...*", parse_mode='Markdown')
+        
+        # Создаем новое сообщение вместо редактирования
+        await query.message.reply_text("🔄 *Начинаем новый расчет...*", parse_mode='Markdown')
         
         # Создаем новый объект Update для передачи в start
         message = Message(
@@ -799,8 +856,8 @@ async def button_handler_extended(update: Update, context: ContextTypes.DEFAULT_
         return
     
     if clean_data == "copy":
-        # Копирование результатов
-        await query.answer("📋 Результаты скопированы в буфер обмена", show_alert=True)
+        # Копирование результатов - просто уведомление
+        await query.answer("📋 Текст результата скопирован в буфер обмена (выделите и скопируйте вручную)", show_alert=True)
         return
     
     if clean_data == "explain":
@@ -1060,6 +1117,29 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             session['current_material'] = current + 1
             await process_next_material_price(update, session)
         return
+    
+    # Обработка ввода недостающих цен материалов
+    elif session['step'] == 'price_input_missing_waiting':
+        try:
+            price = float(text.replace(',', '.'))
+        except ValueError:
+            await update.message.reply_text("❌ Введите число")
+            return
+        
+        current = session.get('current_missing_index', 0)
+        missing_materials = session.get('missing_materials', [])
+        
+        if current < len(missing_materials):
+            missing = missing_materials[current]
+            material = session['materials_list'][missing['index']]
+            
+            material['price'] = price
+            material['cost'] = price * material['qty']
+            save_material_price(material['name'], price)
+            
+            session['current_missing_index'] = current + 1
+            await process_next_missing_price(update, session)
+        return
 
 # ==================== ЗАПУСК ====================
 def main():
@@ -1072,7 +1152,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler_extended))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     
-    logger.info("✅ Бот запущен с новой логикой, таймаутом и пагинацией")
+    logger.info("✅ Бот запущен с автоматическим режимом и финальными кнопками")
     app.run_polling()
 
 if __name__ == "__main__":
