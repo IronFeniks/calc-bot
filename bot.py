@@ -442,6 +442,10 @@ async def nalog_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⏳ *Бот занят*\n\nСейчас расчёты выполняет: *{name}*", parse_mode='Markdown')
         return
     
+    if not bot_lock.acquire(user_id, update.effective_user.username, update.effective_user.first_name):
+        await update.message.reply_text("❌ Не удалось начать расчет. Попробуйте позже.")
+        return
+    
     if user_id not in sessions:
         sessions[user_id] = {}
     
@@ -486,15 +490,39 @@ async def categories_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         bot_lock.release(user_id)
         return
     
-    sessions[user_id] = {'step': 'awaiting_nalog_for_categories'}
-    
-    await update.message.reply_text(
-        "📊 *Полный расчет*\n\n"
-        "Сначала введите общие значения:\n"
-        "`Эффективность (%) Налог (%)`\n\n"
-        "Пример: `150 20`",
-        parse_mode='Markdown'
-    )
+    # Проверяем, есть ли уже сохраненные глобальные значения
+    session = sessions.get(user_id, {})
+    if 'global_efficiency' in session and 'global_tax' in session:
+        # Если есть - сразу показываем категории
+        efficiency = session['global_efficiency']
+        tax = session['global_tax']
+        
+        categories_str = [str(cat) for cat in categories]
+        keyboard = []
+        for cat in sorted(categories_str):
+            keyboard.append([InlineKeyboardButton(cat, callback_data=f"cat_{cat}")])
+        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
+        
+        session.update({
+            'step': 'categories_selection',
+            'efficiency': efficiency,
+            'tax': tax
+        })
+        
+        await update.message.reply_text(
+            "📋 Выберите категорию:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        # Если нет - запрашиваем
+        sessions[user_id] = {'step': 'awaiting_nalog_for_categories'}
+        await update.message.reply_text(
+            "📊 *Полный расчет*\n\n"
+            "Сначала введите общие значения:\n"
+            "`Эффективность (%) Налог (%)`\n\n"
+            "Пример: `150 20`",
+            parse_mode='Markdown'
+        )
 
 async def automatic_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /automatic - автоматический расчет по сохраненным ценам"""
@@ -527,18 +555,44 @@ async def automatic_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bot_lock.release(user_id)
         return
     
-    sessions[user_id] = {
-        'step': 'awaiting_nalog_for_automatic',
-        'automatic_mode': True
-    }
-    
-    await update.message.reply_text(
-        "🤖 *Автоматический расчет*\n\n"
-        "Сначала введите общие значения:\n"
-        "`Эффективность (%) Налог (%)`\n\n"
-        "Пример: `150 20`",
-        parse_mode='Markdown'
-    )
+    # Проверяем, есть ли уже сохраненные глобальные значения
+    session = sessions.get(user_id, {})
+    if 'global_efficiency' in session and 'global_tax' in session:
+        # Если есть - сразу показываем категории
+        efficiency = session['global_efficiency']
+        tax = session['global_tax']
+        
+        categories_str = [str(cat) for cat in categories]
+        keyboard = []
+        for cat in sorted(categories_str):
+            keyboard.append([InlineKeyboardButton(cat, callback_data=f"autocat_{cat}")])
+        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
+        
+        session.update({
+            'step': 'automatic_categories',
+            'efficiency': efficiency,
+            'tax': tax,
+            'automatic_mode': True
+        })
+        
+        await update.message.reply_text(
+            "🤖 *Автоматический расчет*\n\nВыберите категорию:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+    else:
+        # Если нет - запрашиваем
+        sessions[user_id] = {
+            'step': 'awaiting_nalog_for_automatic',
+            'automatic_mode': True
+        }
+        await update.message.reply_text(
+            "🤖 *Автоматический расчет*\n\n"
+            "Сначала введите общие значения:\n"
+            "`Эффективность (%) Налог (%)`\n\n"
+            "Пример: `150 20`",
+            parse_mode='Markdown'
+        )
 
 async def instructions_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /instructions - инструкция к калькулятору"""
@@ -561,7 +615,7 @@ async def instructions_command(update: Update, context: ContextTypes.DEFAULT_TYP
 3️⃣ *Сохранение параметров*
 • Эффективность и налог сохраняются на время сессии
 • При смене изделия в рамках одной категории значения не меняются
-• При смене категории или начале новой сессии нужно ввести заново
+• При смене категории нужно ввести заново
 
 4️⃣ *Процесс расчета*
 • Выберите категорию изделия
@@ -880,6 +934,64 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             })
             await show_products_page(update, session, edit=False)
             return
+     # Шаг 2: Выбор изделия (для обоих режимов)
+elif session['step'] == 'product_selection' or session['step'] == 'automatic_product_selection':
+    try:
+        idx = int(text) - 1
+        if idx < 0 or idx >= len(session['products']):
+            raise ValueError
+        selected = session['products'][idx]
+    except:
+        await update.message.reply_text(f"❌ Введите число от 1 до {len(session['products'])}")
+        return
+    
+    is_automatic = session.get('step') == 'automatic_product_selection'
+    
+    # Получаем полные данные изделия из номенклатуры
+    data = load_from_yandex()
+    product = None
+    for item in data['nomenclature']:
+        if item['Код'] == selected['code']:
+            product = item
+            break
+    
+    if not product:
+        await update.message.reply_text("❌ Ошибка получения данных")
+        return
+    
+    # Получаем кратность с проверкой
+    try:
+        multiplicity = product.get('Кратность', 1)
+        if multiplicity is None or multiplicity == '' or (isinstance(multiplicity, float) and pd.isna(multiplicity)):
+            multiplicity = 1
+        else:
+            multiplicity = int(float(multiplicity))
+    except:
+        multiplicity = 1
+    
+    # Сохраняем выбранное изделие и переходим к следующему шагу
+    if is_automatic:
+        session.update({
+            'step': 'automatic_quantity',
+            'product': product,
+            'output_per_drawing': multiplicity
+        })
+    else:
+        session.update({
+            'step': 'prices',
+            'product': product,
+            'output_per_drawing': multiplicity
+        })
+    
+    saved_price = get_drawing_price(product['Код'])
+    price_text = f"✅ Выбрано: *{product['Наименование']}*\nКратность: {multiplicity}\n\n"
+    price_text += f"💰 Введите через пробел:\n`Рыночная цена Стоимость чертежа`\n\n"
+    if saved_price > 0:
+        price_text += f"*(сохранённая стоимость чертежа: {format_number(saved_price)} ISK)*\n"
+    price_text += f"Пример: `3200000 6900000`"
+    
+    await update.message.reply_text(price_text, parse_mode='Markdown')
+    return       
 
 # ==================== ЗАПУСК ====================
 def main():
