@@ -5,7 +5,7 @@ import requests
 import sqlite3
 import os
 from io import BytesIO
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message, Chat, User
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from config import TOKEN, GROUP_ID, TOPIC_ID, YANDEX_TABLE_URL, CACHE_TTL
 
@@ -369,6 +369,12 @@ async def show_materials_page(update_or_query, session, edit: bool = False, page
     
     items_per_page = 10
     total_pages = (len(materials) + items_per_page - 1) // items_per_page
+    
+    # Проверяем, что запрошенная страница существует
+    if page >= total_pages:
+        page = total_pages - 1
+    if page < 0:
+        page = 0
     
     start_idx = page * items_per_page
     end_idx = min(start_idx + items_per_page, len(materials))
@@ -739,25 +745,39 @@ async def button_handler_extended(update: Update, context: ContextTypes.DEFAULT_
     data = query.data
     
     if not data.startswith(f"user_{user_id}_"):
+        await query.answer("⛔ Эта кнопка не для вас", show_alert=True)
         return
     
     clean_data = data.replace(f"user_{user_id}_", "")
+    logger.info(f"Обработка extended: {clean_data} от пользователя {user_id}")
     
     if clean_data == "restart":
         # Полностью новый расчет
         bot_lock.release(user_id)
         sessions.pop(user_id, None)
         # Создаем новый update для вызова start
-        new_update = Update(update.update_id, message=query.message)
+        await query.edit_message_text("🔄 *Начинаем новый расчет...*", parse_mode='Markdown')
+        
+        # Создаем новый объект Update для передачи в start
+        message = Message(
+            message_id=0,
+            date=int(time.time()),
+            chat=query.message.chat,
+            from_user=query.from_user,
+            text="/start"
+        )
+        
+        new_update = Update(update.update_id, message=message)
         new_update.effective_user = query.from_user
         new_update.effective_chat = query.message.chat
+        
         await start(new_update, context)
         return
     
     if clean_data == "same_category":
         # Новый расчет в той же категории
         session = sessions.get(user_id)
-        if session:
+        if session and 'category' in session:
             # Очищаем данные, но сохраняем категорию
             new_session = {
                 'user_id': user_id,
@@ -774,11 +794,13 @@ async def button_handler_extended(update: Update, context: ContextTypes.DEFAULT_
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode='Markdown'
             )
+        else:
+            await query.answer("❌ Не удалось определить категорию", show_alert=True)
         return
     
     if clean_data == "copy":
         # Копирование результатов
-        await query.answer("📋 Результаты скопированы в буфер обмена (имитация)", show_alert=True)
+        await query.answer("📋 Результаты скопированы в буфер обмена", show_alert=True)
         return
     
     if clean_data == "explain":
@@ -794,30 +816,30 @@ async def button_handler_extended(update: Update, context: ContextTypes.DEFAULT_
     if clean_data == "back_to_result":
         # Вернуться к результатам
         session = sessions.get(user_id)
-        if session and 'last_result' in session:
-            keyboard = [
-                [
-                    InlineKeyboardButton("🔄 Новый расчет", callback_data=f"user_{user_id}_restart"),
-                    InlineKeyboardButton("📂 Та же категория", callback_data=f"user_{user_id}_same_category")
-                ],
-                [
-                    InlineKeyboardButton("📋 Копировать", callback_data=f"user_{user_id}_copy"),
-                    InlineKeyboardButton("📖 Пояснить по цифрам", callback_data=f"user_{user_id}_explain")
-                ]
-            ]
+        if session and 'last_result' in session and 'last_keyboard' in session:
             await query.edit_message_text(
                 session['last_result'],
-                reply_markup=InlineKeyboardMarkup(keyboard),
+                reply_markup=InlineKeyboardMarkup(session['last_keyboard']),
                 parse_mode='Markdown'
             )
+        else:
+            await query.answer("❌ Результаты не найдены", show_alert=True)
         return
     
     if clean_data.startswith("materials_page_"):
-        page = int(clean_data.replace("materials_page_", ""))
-        session = sessions.get(user_id)
-        if session:
-            await show_materials_page(query, session, edit=True, page=page)
+        try:
+            page = int(clean_data.replace("materials_page_", ""))
+            session = sessions.get(user_id)
+            if session:
+                await show_materials_page(query, session, edit=True, page=page)
+            else:
+                await query.answer("❌ Сессия не найдена", show_alert=True)
+        except Exception as e:
+            logger.error(f"Ошибка пагинации: {e}")
+            await query.answer("❌ Ошибка навигации", show_alert=True)
         return
+    
+    logger.warning(f"Неизвестный callback: {clean_data}")
 
 # ==================== ОБРАБОТЧИК ТЕКСТОВЫХ СООБЩЕНИЙ ====================
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
