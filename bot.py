@@ -298,7 +298,6 @@ async def show_products_page(update_or_query, session, edit: bool = False):
     else:
         await update_or_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-
 # ==================== ОБРАБОТЧИКИ КОМАНД ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_access(update):
@@ -336,11 +335,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # Преобразуем все категории в строки перед сортировкой
-categories_str = [str(cat) for cat in categories]
-for cat in sorted(categories_str):
-    keyboard.append([InlineKeyboardButton(cat, callback_data=f"cat_{cat}")])
+    categories_str = [str(cat) for cat in categories]
+    
+    # Создаем клавиатуру
+    keyboard = []
+    for cat in sorted(categories_str):
+        keyboard.append([InlineKeyboardButton(cat, callback_data=f"cat_{cat}")])
+    
+    # Добавляем кнопку отмены
     keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
     
+    # Отправляем сообщение
     await update.message.reply_text(
         "👋 *Производственный калькулятор*\n\nВыберите категорию:",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -369,7 +374,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data in ["prev_page", "next_page"]:
         session = sessions.get(user_id)
         if session and session.get('step') == 'product_selection':
-            session['product_page'] += 1 if data == "next_page" else -1
+            if data == "prev_page":
+                session['product_page'] = max(0, session.get('product_page', 0) - 1)
+            else:
+                session['product_page'] = session.get('product_page', 0) + 1
             await show_products_page(query, session, edit=True)
         return
     
@@ -377,10 +385,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sessions.pop(user_id, None)
         data = load_from_yandex()
         categories = list(set(item.get('Категории', '') for item in data['nomenclature'] if item.get('Категории')))
+        categories_str = [str(cat) for cat in categories]
+        
         keyboard = []
-        for cat in sorted(categories):
+        for cat in sorted(categories_str):
             keyboard.append([InlineKeyboardButton(cat, callback_data=f"cat_{cat}")])
         keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
+        
         await query.edit_message_text(
             "👋 *Производственный калькулятор*\n\nВыберите категорию:",
             reply_markup=InlineKeyboardMarkup(keyboard),
@@ -434,7 +445,114 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         try:
-            efficiency, tax = float(parts[0]), float(parts[1])
+            efficiency = float(parts[0])
+            tax = float(parts[1])
+        except ValueError:
+            await update.message.reply_text("❌ Введите числа")
+            return
+        
+    # Отправляем сообщение
+    await update.message.reply_text(
+        "👋 *Производственный калькулятор*\n\nВыберите категорию:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    data = query.data
+    
+    if data != "cancel" and bot_lock.is_locked() and bot_lock.current_user != user_id:
+        lock_info = bot_lock.get_lock_info()
+        name = lock_info['first_name'] or f"@{lock_info['username']}" if lock_info['username'] else f"ID {lock_info['user_id']}"
+        await query.edit_message_text(f"⏳ *Бот занят*\n\nСейчас расчёты выполняет: *{name}*", parse_mode='Markdown')
+        return
+    
+    if data == "cancel":
+        bot_lock.release(user_id)
+        sessions.pop(user_id, None)
+        await query.edit_message_text("❌ Расчет отменен")
+        return
+    
+    if data in ["prev_page", "next_page"]:
+        session = sessions.get(user_id)
+        if session and session.get('step') == 'product_selection':
+            if data == "prev_page":
+                session['product_page'] = max(0, session.get('product_page', 0) - 1)
+            else:
+                session['product_page'] = session.get('product_page', 0) + 1
+            await show_products_page(query, session, edit=True)
+        return
+    
+    if data == "back_to_categories":
+        sessions.pop(user_id, None)
+        data = load_from_yandex()
+        categories = list(set(item.get('Категории', '') for item in data['nomenclature'] if item.get('Категории')))
+        categories_str = [str(cat) for cat in categories]
+        
+        keyboard = []
+        for cat in sorted(categories_str):
+            keyboard.append([InlineKeyboardButton(cat, callback_data=f"cat_{cat}")])
+        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
+        
+        await query.edit_message_text(
+            "👋 *Производственный калькулятор*\n\nВыберите категорию:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+        return
+    
+    if data == "back_to_products":
+        session = sessions.get(user_id)
+        if session and session.get('step') in ['prices', 'quantity', 'material_prices']:
+            session['step'] = 'product_selection'
+            session['product_page'] = 0
+            await show_products_page(query, session, edit=True)
+        return
+    
+    if data.startswith("cat_"):
+        category = data[4:]
+        sessions[user_id] = {'step': 'parameters', 'category': category}
+        keyboard = [[InlineKeyboardButton("🔙 К категориям", callback_data="back_to_categories")]]
+        await query.edit_message_text(
+            f"📊 *Параметры расчета*\nКатегория: {category}\n\nВведите через пробел:\n`Эффективность (%) Налог (%)`\n\nПример: `150 20`",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+        return
+
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_access(update):
+        return
+    
+    user_id = update.effective_user.id
+    session = sessions.get(user_id)
+    
+    if not session:
+        await update.message.reply_text("Используйте /start")
+        return
+    
+    if bot_lock.is_locked() and bot_lock.current_user != user_id:
+        lock_info = bot_lock.get_lock_info()
+        name = lock_info['first_name'] or f"@{lock_info['username']}" if lock_info['username'] else f"ID {lock_info['user_id']}"
+        await update.message.reply_text(f"⏳ *Бот занят*\n\nСейчас расчёты выполняет: *{name}*", parse_mode='Markdown')
+        return
+    
+    text = update.message.text
+    logger.info(f"Текст от {user_id}: {text}, шаг: {session.get('step')}")
+    
+    if session['step'] == 'parameters':
+        parts = text.split()
+        if len(parts) < 2:
+            await update.message.reply_text("❌ Введите через пробел: Эффективность Налог\nПример: 150 20")
+            return
+        
+        try:
+            efficiency = float(parts[0])
+            tax = float(parts[1])
         except ValueError:
             await update.message.reply_text("❌ Введите числа")
             return
@@ -442,14 +560,22 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = load_from_yandex()
         products = []
         for item in data['nomenclature']:
-            if item.get('Категории') == session['category'] and 'изделие' in str(item.get('Тип', '')).lower():
+            category = item.get('Категории')
+            item_type = str(item.get('Тип') or '').lower()
+            if category == session['category'] and ('изделие' in item_type or 'узел' in item_type):
                 products.append({'code': item['Код'], 'name': item['Наименование']})
         
         if not products:
             await update.message.reply_text("❌ Нет изделий в этой категории")
             return
         
-        session.update({'step': 'product_selection', 'efficiency': efficiency, 'tax': tax, 'products': products, 'product_page': 0})
+        session.update({
+            'step': 'product_selection',
+            'efficiency': efficiency,
+            'tax': tax,
+            'products': products,
+            'product_page': 0
+        })
         await show_products_page(update, session, edit=False)
         return
     
@@ -464,22 +590,34 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         data = load_from_yandex()
-        product = next((item for item in data['nomenclature'] if item['Код'] == selected['code']), None)
+        product = None
+        for item in data['nomenclature']:
+            if item['Код'] == selected['code']:
+                product = item
+                break
         
         if not product:
             await update.message.reply_text("❌ Ошибка получения данных")
             return
         
-        multiplicity = product.get('Кратность', 1)
-        if multiplicity is None or multiplicity == '' or (isinstance(multiplicity, float) and pd.isna(multiplicity)):
+        try:
+            multiplicity = product.get('Кратность', 1)
+            if multiplicity is None or multiplicity == '' or (isinstance(multiplicity, float) and pd.isna(multiplicity)):
+                multiplicity = 1
+            else:
+                multiplicity = int(float(multiplicity))
+        except:
             multiplicity = 1
-        else:
-            multiplicity = int(float(multiplicity))
         
-        session.update({'step': 'prices', 'product': product, 'output_per_drawing': multiplicity})
+        session.update({
+            'step': 'prices',
+            'product': product,
+            'output_per_drawing': multiplicity
+        })
         
         saved_price = get_drawing_price(product['Код'])
-        price_text = f"✅ Выбрано: *{product['Наименование']}*\nКратность: {multiplicity}\n\n💰 Введите через пробел:\n`Рыночная цена Стоимость чертежа`\n\n"
+        price_text = f"✅ Выбрано: *{product['Наименование']}*\nКратность: {multiplicity}\n\n"
+        price_text += f"💰 Введите через пробел:\n`Рыночная цена Стоимость чертежа`\n\n"
         if saved_price > 0:
             price_text += f"*(сохранённая стоимость чертежа: {format_number(saved_price)} ISK)*\n"
         price_text += f"Пример: `3200000 6900000`"
@@ -495,14 +633,19 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         try:
-            market_price, drawing_price = float(parts[0]), float(parts[1])
+            market_price = float(parts[0])
+            drawing_price = float(parts[1])
         except ValueError:
             keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data="back_to_products")]]
             await update.message.reply_text("❌ Введите числа", reply_markup=InlineKeyboardMarkup(keyboard))
             return
         
         save_drawing_price(session['product']['Код'], drawing_price)
-        session.update({'market_price': market_price, 'drawing_price': drawing_price, 'step': 'quantity'})
+        session.update({
+            'market_price': market_price,
+            'drawing_price': drawing_price,
+            'step': 'quantity'
+        })
         await update.message.reply_text("📦 Введите количество продукции (шт):")
         return
     
@@ -514,7 +657,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Введите число", reply_markup=InlineKeyboardMarkup(keyboard))
             return
         
+        product = session['product']
         output = session['output_per_drawing']
+        
         if qty % output != 0:
             keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data="back_to_products")]]
             await update.message.reply_text(f"⚠️ Количество должно быть кратно {output}", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -522,7 +667,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         drawings_needed = int(qty // output)
         data = load_from_yandex()
-        materials_dict = collect_materials(session['product']['Код'], 1, data['nomenclature'], data['specifications'])
+        
+        materials_dict = collect_materials(
+            product['Код'], 1,
+            data['nomenclature'],
+            data['specifications']
+        )
         
         if not materials_dict:
             await update.message.reply_text("❌ Нет материалов для этого изделия")
@@ -533,12 +683,26 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for m in materials_dict.values():
             raw = (m['baseQty'] / 1.5) * (session['efficiency'] / 100)
             rounded = (raw * 10 // 1 + 1) / 10 if raw * 10 % 1 > 0 else raw
-            materials_list.append({'number': i, 'name': m['name'], 'qty': rounded * drawings_needed})
+            final_qty = rounded * drawings_needed
+            materials_list.append({
+                'number': i,
+                'name': m['name'],
+                'qty': final_qty
+            })
             i += 1
         
         saved_prices = get_all_material_prices()
-        session.update({'step': 'material_prices', 'qty': qty, 'drawings_needed': drawings_needed, 'materials_list': materials_list})
-        await update.message.reply_text(format_materials_for_input(materials_list, saved_prices), parse_mode='Markdown')
+        session.update({
+            'step': 'material_prices',
+            'qty': qty,
+            'drawings_needed': drawings_needed,
+            'materials_list': materials_list
+        })
+        
+        await update.message.reply_text(
+            format_materials_for_input(materials_list, saved_prices),
+            parse_mode='Markdown'
+        )
         return
     
     elif session['step'] == 'material_prices':
@@ -564,28 +728,38 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         price_str = str(session['product'].get('Цена производства', '0')).replace(' ISK', '').replace(' ', '')
         try:
-            prod_cost = float(price_str) * session['drawings_needed']
+            prod_cost = float(price_str) if price_str else 0
         except:
             prod_cost = 0
+        prod_cost = prod_cost * session['drawings_needed']
         
-        total = material_cost + prod_cost + session['drawing_price'] * session['drawings_needed']
+        drawing_cost = session['drawing_price'] * session['drawings_needed']
+        total = material_cost + prod_cost + drawing_cost
         revenue = session['market_price'] * session['qty']
         profit_before = revenue - total
         tax = profit_before * session['tax'] / 100 if profit_before > 0 else 0
+        profit_after = profit_before - tax
         
         result = {
             'materialCost': material_cost,
             'prodCost': prod_cost,
-            'drawingCost': session['drawing_price'] * session['drawings_needed'],
+            'drawingCost': drawing_cost,
             'totalCost': total,
             'revenue': revenue,
             'profitBeforeTax': profit_before,
             'tax': tax,
-            'profitAfterTax': profit_before - tax
+            'profitAfterTax': profit_after
         }
         
         await update.message.reply_text(
-            format_results(session['product']['Наименование'], session['qty'], session['efficiency'], session['tax'], session['materials_list'], result),
+            format_results(
+                session['product']['Наименование'],
+                session['qty'],
+                session['efficiency'],
+                session['tax'],
+                session['materials_list'],
+                result
+            ),
             parse_mode='Markdown'
         )
         
