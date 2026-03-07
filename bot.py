@@ -335,9 +335,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bot_lock.release(user_id)
         return
     
-    keyboard = []
-    for cat in sorted(categories):
-        keyboard.append([InlineKeyboardButton(cat, callback_data=f"cat_{cat}")])
+    # Преобразуем все категории в строки перед сортировкой
+categories_str = [str(cat) for cat in categories]
+for cat in sorted(categories_str):
+    keyboard.append([InlineKeyboardButton(cat, callback_data=f"cat_{cat}")])
     keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
     
     await update.message.reply_text(
