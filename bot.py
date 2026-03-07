@@ -6,6 +6,15 @@ from io import BytesIO
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from config import TOKEN, GROUP_ID, TOPIC_ID, YANDEX_TABLE_URL, CACHE_TTL
+
+import importlib.util
+import os
+import sys
+
+# Добавляем текущую директорию в путь поиска модулей
+sys.path.append(os.path.dirname(__file__))
+
+# Импортируем наши модули
 import prices_db
 from lock import bot_lock
 
