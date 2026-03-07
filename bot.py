@@ -267,10 +267,16 @@ def format_results(product_name, qty, efficiency, tax_rate, materials_list, resu
     
     return text
 
+# ==================== ФУНКЦИИ ДЛЯ АВТОМАТИЧЕСКОГО РЕЖИМА ====================
+
 async def show_products_page(update_or_query, session, edit: bool = False):
     products = session['products']
     page = session.get('product_page', 0)
     items_per_page = 20
+    user_id = session.get('user_id')
+    
+    if not user_id and hasattr(update_or_query, 'from_user'):
+        user_id = update_or_query.from_user.id
     
     start_idx = page * items_per_page
     end_idx = min(start_idx + items_per_page, len(products))
@@ -284,13 +290,13 @@ async def show_products_page(update_or_query, session, edit: bool = False):
     keyboard = []
     nav_row = []
     if page > 0:
-        nav_row.append(InlineKeyboardButton("◀️ Назад", callback_data="prev_page"))
+        nav_row.append(InlineKeyboardButton("◀️ Назад", callback_data=f"user_{user_id}_prev_page"))
     if end_idx < len(products):
-        nav_row.append(InlineKeyboardButton("Вперед ▶️", callback_data="next_page"))
+        nav_row.append(InlineKeyboardButton("Вперед ▶️", callback_data=f"user_{user_id}_next_page"))
     if nav_row:
         keyboard.append(nav_row)
     
-    keyboard.append([InlineKeyboardButton("🔙 К категориям", callback_data="back_to_categories")])
+    keyboard.append([InlineKeyboardButton("🔙 К категориям", callback_data=f"user_{user_id}_back_to_categories")])
     keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
     
     if edit:
@@ -298,13 +304,15 @@ async def show_products_page(update_or_query, session, edit: bool = False):
     else:
         await update_or_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-# ==================== ФУНКЦИИ ДЛЯ АВТОМАТИЧЕСКОГО РЕЖИМА ====================
-
 async def show_automatic_products_page(update_or_query, session, edit: bool = False):
     """Показывает страницу со списком изделий для автоматического расчета"""
     products = session['products']
     page = session.get('product_page', 0)
     items_per_page = 20
+    user_id = session.get('user_id')
+    
+    if not user_id and hasattr(update_or_query, 'from_user'):
+        user_id = update_or_query.from_user.id
     
     start_idx = page * items_per_page
     end_idx = min(start_idx + items_per_page, len(products))
@@ -318,13 +326,13 @@ async def show_automatic_products_page(update_or_query, session, edit: bool = Fa
     keyboard = []
     nav_row = []
     if page > 0:
-        nav_row.append(InlineKeyboardButton("◀️ Назад", callback_data="autoprev_page"))
+        nav_row.append(InlineKeyboardButton("◀️ Назад", callback_data=f"user_{user_id}_autoprev_page"))
     if end_idx < len(products):
-        nav_row.append(InlineKeyboardButton("Вперед ▶️", callback_data="autonext_page"))
+        nav_row.append(InlineKeyboardButton("Вперед ▶️", callback_data=f"user_{user_id}_autonext_page"))
     if nav_row:
         keyboard.append(nav_row)
     
-    keyboard.append([InlineKeyboardButton("🔙 К категориям", callback_data="back_to_automatic_categories")])
+    keyboard.append([InlineKeyboardButton("🔙 К категориям", callback_data=f"user_{user_id}_back_to_automatic_categories")])
     keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
     
     if edit:
@@ -397,7 +405,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     sessions.pop(user_id, None)
-    sessions[user_id] = {'step': 'categories'}
+    sessions[user_id] = {'step': 'categories', 'user_id': user_id}
     
     data = load_from_yandex()
     
@@ -417,7 +425,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = []
     for cat in sorted(categories_str):
-        keyboard.append([InlineKeyboardButton(cat, callback_data=f"cat_{cat}")])
+        callback_data = f"user_{user_id}_cat_{cat}"
+        keyboard.append([InlineKeyboardButton(cat, callback_data=callback_data)])
     
     keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
     
@@ -447,7 +456,7 @@ async def nalog_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     if user_id not in sessions:
-        sessions[user_id] = {}
+        sessions[user_id] = {'user_id': user_id}
     
     sessions[user_id]['step'] = 'awaiting_nalog'
     
@@ -500,13 +509,15 @@ async def categories_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         categories_str = [str(cat) for cat in categories]
         keyboard = []
         for cat in sorted(categories_str):
-            keyboard.append([InlineKeyboardButton(cat, callback_data=f"cat_{cat}")])
+            callback_data = f"user_{user_id}_cat_{cat}"
+            keyboard.append([InlineKeyboardButton(cat, callback_data=callback_data)])
         keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
         
         session.update({
             'step': 'categories_selection',
             'efficiency': efficiency,
-            'tax': tax
+            'tax': tax,
+            'user_id': user_id
         })
         
         await update.message.reply_text(
@@ -515,7 +526,7 @@ async def categories_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
     else:
         # Если нет - запрашиваем
-        sessions[user_id] = {'step': 'awaiting_nalog_for_categories'}
+        sessions[user_id] = {'step': 'awaiting_nalog_for_categories', 'user_id': user_id}
         await update.message.reply_text(
             "📊 *Полный расчет*\n\n"
             "Сначала введите общие значения:\n"
@@ -565,14 +576,16 @@ async def automatic_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         categories_str = [str(cat) for cat in categories]
         keyboard = []
         for cat in sorted(categories_str):
-            keyboard.append([InlineKeyboardButton(cat, callback_data=f"autocat_{cat}")])
+            callback_data = f"user_{user_id}_autocat_{cat}"
+            keyboard.append([InlineKeyboardButton(cat, callback_data=callback_data)])
         keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
         
         session.update({
             'step': 'automatic_categories',
             'efficiency': efficiency,
             'tax': tax,
-            'automatic_mode': True
+            'automatic_mode': True,
+            'user_id': user_id
         })
         
         await update.message.reply_text(
@@ -584,7 +597,8 @@ async def automatic_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Если нет - запрашиваем
         sessions[user_id] = {
             'step': 'awaiting_nalog_for_automatic',
-            'automatic_mode': True
+            'automatic_mode': True,
+            'user_id': user_id
         }
         await update.message.reply_text(
             "🤖 *Автоматический расчет*\n\n"
@@ -647,22 +661,38 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     data = query.data
     
-    if data != "cancel" and bot_lock.is_locked() and bot_lock.current_user != user_id:
+    # Проверяем, что callback data содержит ID пользователя
+    if not data.startswith(f"user_{user_id}_") and data not in ["cancel"]:
+        # Если это не кнопка отмены и не принадлежит текущему пользователю - игнорируем
+        await query.answer("⛔ Эта кнопка не для вас", show_alert=True)
+        return
+    
+    # Очищаем data от префикса с user_id
+    clean_data = data
+    if data.startswith(f"user_{user_id}_"):
+        clean_data = data.replace(f"user_{user_id}_", "")
+    
+    # Проверяем блокировку (кроме кнопки отмены)
+    if clean_data != "cancel" and bot_lock.is_locked() and bot_lock.current_user != user_id:
         lock_info = bot_lock.get_lock_info()
         name = lock_info['first_name'] or f"@{lock_info['username']}" if lock_info['username'] else f"ID {lock_info['user_id']}"
         await query.edit_message_text(f"⏳ *Бот занят*\n\nСейчас расчёты выполняет: *{name}*", parse_mode='Markdown')
         return
     
-    if data == "cancel":
-        bot_lock.release(user_id)
-        sessions.pop(user_id, None)
-        await query.edit_message_text("❌ Расчет отменен")
+    if clean_data == "cancel":
+        # Проверяем, что отменяет именно тот, кто начал расчет
+        if bot_lock.current_user == user_id:
+            bot_lock.release(user_id)
+            sessions.pop(user_id, None)
+            await query.edit_message_text("❌ Расчет отменен")
+        else:
+            await query.answer("⛔ Вы не можете отменить чужой расчет", show_alert=True)
         return
     
-    if data in ["prev_page", "next_page"]:
+    if clean_data in ["prev_page", "next_page"]:
         session = sessions.get(user_id)
         if session and session.get('step') == 'product_selection':
-            if data == "prev_page":
+            if clean_data == "prev_page":
                 session['product_page'] = max(0, session.get('product_page', 0) - 1)
             else:
                 session['product_page'] = session.get('product_page', 0) + 1
@@ -670,17 +700,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # Навигация для автоматического режима
-    if data in ["autoprev_page", "autonext_page"]:
+    if clean_data in ["autoprev_page", "autonext_page"]:
         session = sessions.get(user_id)
         if session and session.get('step') == 'automatic_product_selection':
-            if data == "autoprev_page":
+            if clean_data == "autoprev_page":
                 session['product_page'] = max(0, session.get('product_page', 0) - 1)
             else:
                 session['product_page'] = session.get('product_page', 0) + 1
             await show_automatic_products_page(query, session, edit=True)
         return
     
-    if data == "back_to_categories":
+    if clean_data == "back_to_categories":
         # При возврате к категориям удаляем глобальные значения
         session = sessions.get(user_id, {})
         if 'global_efficiency' in session:
@@ -695,7 +725,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         keyboard = []
         for cat in sorted(categories_str):
-            keyboard.append([InlineKeyboardButton(cat, callback_data=f"cat_{cat}")])
+            callback_data = f"user_{user_id}_cat_{cat}"
+            keyboard.append([InlineKeyboardButton(cat, callback_data=callback_data)])
         keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
         
         await query.edit_message_text(
@@ -705,7 +736,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    if data == "back_to_automatic_categories":
+    if clean_data == "back_to_automatic_categories":
         session = sessions.get(user_id)
         if session:
             # При возврате к категориям удаляем глобальные значения
@@ -720,7 +751,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             categories_str = [str(cat) for cat in categories]
             keyboard = []
             for cat in sorted(categories_str):
-                keyboard.append([InlineKeyboardButton(cat, callback_data=f"autocat_{cat}")])
+                callback_data = f"user_{user_id}_autocat_{cat}"
+                keyboard.append([InlineKeyboardButton(cat, callback_data=callback_data)])
             keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
             await query.edit_message_text(
                 "🤖 *Автоматический расчет*\n\nВыберите категорию:",
@@ -729,7 +761,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
     
-    if data == "back_to_products":
+    if clean_data == "back_to_products":
         session = sessions.get(user_id)
         if session and session.get('step') in ['prices', 'quantity', 'material_prices', 'automatic_quantity', 'automatic_missing_prices']:
             session['step'] = 'product_selection'
@@ -737,8 +769,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_products_page(query, session, edit=True)
         return
     
-    if data.startswith("cat_"):
-        category = data[4:]
+    if clean_data.startswith("cat_"):
+        category = clean_data[4:]
         # При смене категории удаляем глобальные значения налога и эффективности
         session = sessions.get(user_id, {})
         if 'global_efficiency' in session:
@@ -746,8 +778,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if 'global_tax' in session:
             del session['global_tax']
         
-        sessions[user_id] = {'step': 'parameters', 'category': category}
-        keyboard = [[InlineKeyboardButton("🔙 К категориям", callback_data="back_to_categories")]]
+        sessions[user_id] = {'step': 'parameters', 'category': category, 'user_id': user_id}
+        keyboard = [[InlineKeyboardButton("🔙 К категориям", callback_data=f"user_{user_id}_back_to_categories")]]
         await query.edit_message_text(
             f"📊 *Параметры расчета*\nКатегория: {category}\n\nВведите через пробел:\n`Эффективность (%) Налог (%)`\n\nПример: `150 20`",
             reply_markup=InlineKeyboardMarkup(keyboard),
@@ -755,8 +787,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    if data.startswith("autocat_"):
-        category = data[8:]
+    if clean_data.startswith("autocat_"):
+        category = clean_data[8:]
         session = sessions.get(user_id)
         if not session:
             return
@@ -841,7 +873,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             keyboard = []
             for cat in sorted(categories_str):
-                keyboard.append([InlineKeyboardButton(cat, callback_data=f"cat_{cat}")])
+                callback_data = f"user_{user_id}_cat_{cat}"
+                keyboard.append([InlineKeyboardButton(cat, callback_data=callback_data)])
             keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
             
             await update.message.reply_text(
@@ -862,7 +895,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             keyboard = []
             for cat in sorted(categories_str):
-                keyboard.append([InlineKeyboardButton(cat, callback_data=f"autocat_{cat}")])
+                callback_data = f"user_{user_id}_autocat_{cat}"
+                keyboard.append([InlineKeyboardButton(cat, callback_data=callback_data)])
             keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
             
             await update.message.reply_text(
@@ -998,7 +1032,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif session['step'] == 'prices':
         parts = text.split()
         if len(parts) < 2:
-            keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data="back_to_products")]]
+            keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data=f"user_{user_id}_back_to_products")]]
             await update.message.reply_text("❌ Введите две цены через пробел\nПример: 3200000 6900000", reply_markup=InlineKeyboardMarkup(keyboard))
             return
         
@@ -1006,7 +1040,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             market_price = float(parts[0])
             drawing_price = float(parts[1])
         except ValueError:
-            keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data="back_to_products")]]
+            keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data=f"user_{user_id}_back_to_products")]]
             await update.message.reply_text("❌ Введите числа", reply_markup=InlineKeyboardMarkup(keyboard))
             return
         
@@ -1024,7 +1058,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             qty = float(text)
         except ValueError:
-            keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data="back_to_products")]]
+            keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data=f"user_{user_id}_back_to_products")]]
             await update.message.reply_text("❌ Введите число", reply_markup=InlineKeyboardMarkup(keyboard))
             return
         
@@ -1032,7 +1066,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         output = session['output_per_drawing']
         
         if qty % output != 0:
-            keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data="back_to_products")]]
+            keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data=f"user_{user_id}_back_to_products")]]
             await update.message.reply_text(f"⚠️ Количество должно быть кратно {output}", reply_markup=InlineKeyboardMarkup(keyboard))
             return
         
@@ -1080,14 +1114,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif session['step'] == 'material_prices':
         parts = text.split()
         if len(parts) < len(session['materials_list']):
-            keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data="back_to_products")]]
+            keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data=f"user_{user_id}_back_to_products")]]
             await update.message.reply_text(f"❌ Введите {len(session['materials_list'])} цен через пробел", reply_markup=InlineKeyboardMarkup(keyboard))
             return
         
         try:
             prices = [float(p) for p in parts[:len(session['materials_list'])]]
         except ValueError:
-            keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data="back_to_products")]]
+            keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data=f"user_{user_id}_back_to_products")]]
             await update.message.reply_text("❌ Введите числа", reply_markup=InlineKeyboardMarkup(keyboard))
             return
         
@@ -1144,7 +1178,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             qty = float(text)
         except ValueError:
-            keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data="back_to_products")]]
+            keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data=f"user_{user_id}_back_to_products")]]
             await update.message.reply_text("❌ Введите число", reply_markup=InlineKeyboardMarkup(keyboard))
             return
         
@@ -1152,7 +1186,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         output = session['output_per_drawing']
         
         if qty % output != 0:
-            keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data="back_to_products")]]
+            keyboard = [[InlineKeyboardButton("🔙 К выбору изделия", callback_data=f"user_{user_id}_back_to_products")]]
             await update.message.reply_text(f"⚠️ Количество должно быть кратно {output}", reply_markup=InlineKeyboardMarkup(keyboard))
             return
         
@@ -1244,7 +1278,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     
-    logger.info("✅ Бот запущен с новыми командами")
+    logger.info("✅ Бот запущен с новыми командами и защитой от чужих кнопок")
     app.run_polling()
 
 if __name__ == "__main__":
