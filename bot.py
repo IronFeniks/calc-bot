@@ -6,6 +6,8 @@ from io import BytesIO
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from config import TOKEN, GROUP_ID, TOPIC_ID, YANDEX_TABLE_URL, CACHE_TTL
+import prices_db
+from lock import bot_lock
 
 # ==================== НАСТРОЙКА ЛОГИРОВАНИЯ ====================
 logging.basicConfig(
@@ -92,11 +94,6 @@ def collect_materials(product_code, multiplier, nomenclature, specifications):
     materials = {}
     logger.info(f"Сбор материалов для продукта: {product_code}")
     
-    # Покажем пример структуры для отладки
-    if specifications:
-        logger.info(f"Пример спецификации: {specifications[0]}")
-        logger.info(f"Ключи в спецификации: {list(specifications[0].keys())}")
-    
     def explode(code, mult):
         logger.info(f"Обрабатываем узел: {code}, множитель: {mult}")
         found = 0
@@ -177,11 +174,18 @@ def calculate_materials(materials, qty, drawings_needed, efficiency, material_pr
 def format_number(num):
     return f"{num:,.2f}".replace(",", " ")
 
-def format_materials_for_input(materials_list):
+def format_materials_for_input(materials_list, saved_prices):
     """Формирует список материалов для запроса цен"""
-    result = "📦 *Материалы*\n\nВведите цены через пробел в том же порядке:\n\n"
+    result = "📦 *Материалы*\n\n"
+    result += "Введите цены через пробел в том же порядке:\n\n"
+    
     for m in materials_list:
-        result += f"{m['number']}. {m['name']} — нужно {format_number(m['qty'])} шт\n"
+        saved = saved_prices.get(m['name'], 0)
+        if saved > 0:
+            result += f"{m['number']}. {m['name']} — нужно {format_number(m['qty'])} шт *(сохранённая цена: {format_number(saved)} ISK)*\n"
+        else:
+            result += f"{m['number']}. {m['name']} — нужно {format_number(m['qty'])} шт\n"
+    
     return result
 
 def format_results(product_name, qty, efficiency, tax_rate, materials_list, result):
@@ -267,34 +271,53 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     user_id = update.effective_user.id
+    username = update.effective_user.username
+    first_name = update.effective_user.first_name
+    
+    # Проверяем блокировку
+    if bot_lock.is_locked() and bot_lock.current_user != user_id:
+        lock_info = bot_lock.get_lock_info()
+        name = lock_info['first_name'] or f"@{lock_info['username']}" if lock_info['username'] else f"ID {lock_info['user_id']}"
+        await update.message.reply_text(
+            f"⏳ *Бот занят*\n\n"
+            f"Сейчас расчёты выполняет: *{name}*\n"
+            f"Пожалуйста, подождите или попросите завершить работу через /cancel",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Пытаемся захватить блокировку
+    if not bot_lock.acquire(user_id, username, first_name):
+        await update.message.reply_text("❌ Не удалось начать расчет. Попробуйте позже.")
+        return
+    
+    # Очищаем старую сессию
+    if user_id in sessions:
+        del sessions[user_id]
+    
     sessions[user_id] = {'step': 'categories'}
     
     data = load_from_yandex()
     
     if not data['nomenclature']:
         await update.message.reply_text("❌ Ошибка загрузки данных")
+        bot_lock.release(user_id)
         return
     
-    # Получаем и очищаем категории
-    raw_categories = list(set(
+    # Получаем категории прямо из данных
+    categories = list(set(
         item.get('Категории', '') for item in data['nomenclature'] 
         if item.get('Категории')
     ))
     
-    clean_categories = []
-    for cat in raw_categories:
-        if cat and str(cat).strip():
-            clean_cat = str(cat).strip()
-            if clean_cat:
-                clean_categories.append(clean_cat)
-    
-    if not clean_categories:
+    if not categories:
         await update.message.reply_text("❌ В базе нет категорий")
+        bot_lock.release(user_id)
         return
     
-    # Создаем клавиатуру
+    # Создаем inline клавиатуру с категориями
     keyboard = []
-    for cat in clean_categories[:10]:
+    for cat in sorted(categories):  # Сортируем для удобства
         keyboard.append([InlineKeyboardButton(cat, callback_data=f"cat_{cat}")])
     keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
     
@@ -311,7 +334,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     data = query.data
     
+    # Проверяем блокировку (кроме отмены)
+    if data != "cancel" and bot_lock.is_locked() and bot_lock.current_user != user_id:
+        lock_info = bot_lock.get_lock_info()
+        name = lock_info['first_name'] or f"@{lock_info['username']}" if lock_info['username'] else f"ID {lock_info['user_id']}"
+        await query.edit_message_text(
+            f"⏳ *Бот занят*\n\nСейчас расчёты выполняет: *{name}*",
+            parse_mode='Markdown'
+        )
+        return
+    
     if data == "cancel":
+        bot_lock.release(user_id)
         sessions.pop(user_id, None)
         await query.edit_message_text("❌ Расчет отменен")
         return
@@ -331,20 +365,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sessions.pop(user_id, None)
         data = load_from_yandex()
         
-        raw_categories = list(set(
+        categories = list(set(
             item.get('Категории', '') for item in data['nomenclature'] 
             if item.get('Категории')
         ))
         
-        clean_categories = []
-        for cat in raw_categories:
-            if cat and str(cat).strip():
-                clean_cat = str(cat).strip()
-                if clean_cat:
-                    clean_categories.append(clean_cat)
-        
         keyboard = []
-        for cat in clean_categories[:10]:
+        for cat in sorted(categories):
             keyboard.append([InlineKeyboardButton(cat, callback_data=f"cat_{cat}")])
         keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
         
@@ -391,6 +418,16 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not session:
         await update.message.reply_text("Используйте /start")
+        return
+    
+    # Проверяем блокировку
+    if bot_lock.is_locked() and bot_lock.current_user != user_id:
+        lock_info = bot_lock.get_lock_info()
+        name = lock_info['first_name'] or f"@{lock_info['username']}" if lock_info['username'] else f"ID {lock_info['user_id']}"
+        await update.message.reply_text(
+            f"⏳ *Бот занят*\n\nСейчас расчёты выполняет: *{name}*",
+            parse_mode='Markdown'
+        )
         return
     
     text = update.message.text
@@ -471,18 +508,27 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             multiplicity = 1
         
+        # Проверяем сохранённую цену чертежа
+        saved_drawing_price = prices_db.get_drawing_price(product['Код'])
+        
         session.update({
             'step': 'prices',
             'product': product,
             'output_per_drawing': multiplicity
         })
         
+        price_text = f"✅ Выбрано: *{product['Наименование']}*\n"
+        price_text += f"Кратность: {multiplicity}\n\n"
+        price_text += f"💰 Введите через пробел:\n"
+        price_text += f"`Рыночная цена Стоимость чертежа`\n\n"
+        
+        if saved_drawing_price > 0:
+            price_text += f"*(сохранённая стоимость чертежа: {format_number(saved_drawing_price)} ISK)*\n"
+        
+        price_text += f"Пример: `3200000 6900000`"
+        
         await update.message.reply_text(
-            f"✅ Выбрано: *{product['Наименование']}*\n"
-            f"Кратность: {multiplicity}\n\n"
-            f"💰 Введите через пробел:\n"
-            f"`Рыночная цена Стоимость чертежа`\n\n"
-            f"Пример: `3200000 6900000`",
+            price_text,
             parse_mode='Markdown'
         )
         return
@@ -507,6 +553,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
             return
+        
+        # Сохраняем цену чертежа
+        prices_db.save_drawing_price(session['product']['Код'], drawing_price)
         
         session.update({
             'market_price': market_price,
@@ -567,6 +616,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             })
             i += 1
         
+        # Получаем сохранённые цены материалов
+        saved_prices = prices_db.get_all_material_prices()
+        
         session.update({
             'step': 'material_prices',
             'qty': qty,
@@ -575,7 +627,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         })
         
         await update.message.reply_text(
-            format_materials_for_input(materials_list),
+            format_materials_for_input(materials_list, saved_prices),
             parse_mode='Markdown'
         )
         return
@@ -600,9 +652,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
+        # Сохраняем цены материалов
         for i, m in enumerate(session['materials_list']):
             m['price'] = prices[i]
             m['cost'] = m['qty'] * prices[i]
+            prices_db.save_material_price(m['name'], prices[i])
         
         material_cost = sum(m['qty'] * m['price'] for m in session['materials_list'])
         
@@ -644,16 +698,21 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
         
+        # Очищаем сессию и освобождаем блокировку
         sessions.pop(user_id, None)
+        bot_lock.release(user_id)
         return
 
 # ==================== ЗАПУСК ====================
 def main():
+    # Инициализируем базу данных цен
+    prices_db.init_prices_db()
+    
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-    logger.info("Бот запущен")
+    logger.info("✅ Бот запущен с сохранением цен и блокировкой пользователей")
     app.run_polling()
 
 if __name__ == "__main__":
