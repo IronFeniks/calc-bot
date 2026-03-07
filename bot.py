@@ -1278,6 +1278,24 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     
+    # Устанавливаем кнопку меню с командами
+    async def setup_menu():
+        try:
+            await app.bot.set_my_commands([
+                ("start", "Начать новый расчет"),
+                ("nalog", "Установка налога и эффективности"),
+                ("categories", "Полный расчет по категориям"),
+                ("automatic", "Автоматический расчет"),
+                ("instructions", "Инструкция")
+            ])
+            logger.info("✅ Меню с командами установлено")
+        except Exception as e:
+            logger.error(f"❌ Ошибка установки меню: {e}")
+    
+    # Запускаем установку меню
+    import asyncio
+    asyncio.create_task(setup_menu())
+    
     logger.info("✅ Бот запущен с новыми командами и защитой от чужих кнопок")
     app.run_polling()
 
