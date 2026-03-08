@@ -885,7 +885,6 @@ async def continue_to_result(update_or_query, session):
         await update_or_query.message.reply_text(result_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     else:
         await update_or_query.edit_message_text(result_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-
 # ==================== ОБРАБОТЧИК ТЕКСТОВЫХ СООБЩЕНИЙ ====================
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_access(update):
