@@ -546,23 +546,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bot_lock.release(user_id)
         sessions.pop(user_id, None)
         
-        # Создаем новое сообщение вместо редактирования
+        # Создаем новое сообщение
         await query.message.reply_text("🔄 *Начинаем новый расчет...*", parse_mode='Markdown')
         
-        # Создаем новый объект Update для передачи в start
-        message = Message(
-            message_id=0,
-            date=int(time.time()),
-            chat=query.message.chat,
-            from_user=query.from_user,
-            text="/start"
-        )
-        
-        new_update = Update(update.update_id, message=message)
-        new_update.effective_user = query.from_user
-        new_update.effective_chat = query.message.chat
-        
-        await start(new_update, context)
+        # Вызываем start через создание нового update
+        await restart_bot(query, context)
         return
     
     if clean_data == "same_category":
@@ -758,6 +746,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     logger.warning(f"Неизвестный callback: {clean_data}")
+
+async def restart_bot(query, context: ContextTypes.DEFAULT_TYPE):
+    """Вспомогательная функция для перезапуска бота"""
+    # Создаем искусственное сообщение
+    message = Message(
+        message_id=query.message.message_id,
+        date=query.message.date,
+        chat=query.message.chat,
+        from_user=query.from_user,
+        text="/start"
+    )
+    
+    # Создаем новый update
+    new_update = Update(update_id=0, message=message)
+    
+    # Вызываем start
+    await start(new_update, context)
 
 async def process_next_material_price(update_or_query, session):
     """Обрабатывает пошаговый ввод цен материалов"""
@@ -1131,7 +1136,7 @@ def main():
     app = Application.builder().token(TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))  # Только один обработчик
+    app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     
     logger.info("✅ Бот запущен с автоматическим режимом и финальными кнопками")
