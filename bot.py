@@ -289,7 +289,7 @@ def format_results(product_name, category, qty, efficiency, tax_rate, materials_
 def get_explanation_text():
     """Возвращает текст пояснения по расчетам"""
     return """
-📖 *ПОЯСНИТЬ ПО ЦИФРАМ*
+📖 *ПОЯСНЕНИЕ ПО ЦИФРАМ*
 
 💰 *Материалы*
 • Сумма всех затрат на материалы
@@ -416,7 +416,7 @@ async def show_materials_page(update_or_query, session, edit: bool = False, page
     # Сохраняем текущую страницу в сессии
     session['materials_page'] = page
 
-# ==================== ОБРАБОТЧИКИ КОМАНД ====================
+# ==================== ОБРАБОТЧИК КОМАНД ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка команды /start с инструкцией"""
@@ -497,7 +497,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-# ==================== ОБРАБОТЧИК КНОПОК ====================
+# ==================== ОБРАБОТЧИК КНОПОК (ОБЪЕДИНЕННЫЙ) ====================
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -511,8 +511,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     data = query.data
+    logger.info(f"Обработка callback: {data} от пользователя {user_id}")
     
-    # Проверяем, что callback data содержит ID пользователя
+    # Проверяем, что callback data содержит ID пользователя (кроме глобальной отмены)
     if not data.startswith(f"user_{user_id}_") and data not in ["cancel"]:
         await query.answer("⛔ Эта кнопка не для вас", show_alert=True)
         return
@@ -529,6 +530,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"⏳ *Бот занят*\n\nСейчас расчёты выполняет: *{name}*", parse_mode='Markdown')
         return
     
+    # Глобальная отмена
     if clean_data == "cancel":
         if bot_lock.current_user == user_id:
             bot_lock.release(user_id)
@@ -538,6 +540,98 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("⛔ Вы не можете отменить чужой расчет", show_alert=True)
         return
     
+    # ==================== ФИНАЛЬНЫЕ КНОПКИ ====================
+    if clean_data == "restart":
+        # Полностью новый расчет
+        bot_lock.release(user_id)
+        sessions.pop(user_id, None)
+        
+        # Создаем новое сообщение вместо редактирования
+        await query.message.reply_text("🔄 *Начинаем новый расчет...*", parse_mode='Markdown')
+        
+        # Создаем новый объект Update для передачи в start
+        message = Message(
+            message_id=0,
+            date=int(time.time()),
+            chat=query.message.chat,
+            from_user=query.from_user,
+            text="/start"
+        )
+        
+        new_update = Update(update.update_id, message=message)
+        new_update.effective_user = query.from_user
+        new_update.effective_chat = query.message.chat
+        
+        await start(new_update, context)
+        return
+    
+    if clean_data == "same_category":
+        # Новый расчет в той же категории
+        session = sessions.get(user_id)
+        if session and 'category' in session:
+            # Очищаем данные, но сохраняем категорию
+            new_session = {
+                'user_id': user_id,
+                'category': session['category'],
+                'step': 'parameters'
+            }
+            sessions[user_id] = new_session
+            keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]
+            await query.edit_message_text(
+                f"📊 *Параметры для категории {session['category']}*\n\n"
+                f"Введите через пробел:\n"
+                f"`Эффективность (%) Налог (%)`\n\n"
+                f"Пример: `150 20`",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+        else:
+            await query.answer("❌ Не удалось определить категорию", show_alert=True)
+        return
+    
+    if clean_data == "copy":
+        # Копирование результатов - просто уведомление
+        await query.answer("📋 Текст результата можно скопировать выделением", show_alert=True)
+        return
+    
+    if clean_data == "explain":
+        # Показать пояснение
+        keyboard = [[InlineKeyboardButton("🔙 Назад к результатам", callback_data=f"user_{user_id}_back_to_result")]]
+        await query.edit_message_text(
+            get_explanation_text(),
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+        return
+    
+    if clean_data == "back_to_result":
+        # Вернуться к результатам
+        session = sessions.get(user_id)
+        if session and 'last_result' in session and 'last_keyboard' in session:
+            await query.edit_message_text(
+                session['last_result'],
+                reply_markup=InlineKeyboardMarkup(session['last_keyboard']),
+                parse_mode='Markdown'
+            )
+        else:
+            await query.answer("❌ Результаты не найдены", show_alert=True)
+        return
+    
+    # ==================== НАВИГАЦИЯ ПО МАТЕРИАЛАМ ====================
+    if clean_data.startswith("materials_page_"):
+        try:
+            page = int(clean_data.replace("materials_page_", ""))
+            session = sessions.get(user_id)
+            if session:
+                await show_materials_page(query, session, edit=True, page=page)
+            else:
+                await query.answer("❌ Сессия не найдена", show_alert=True)
+        except Exception as e:
+            logger.error(f"Ошибка пагинации: {e}")
+            await query.answer("❌ Ошибка навигации", show_alert=True)
+        return
+    
+    # ==================== ОСНОВНЫЕ КНОПКИ ====================
     if clean_data == "back_to_categories":
         # Возврат к категориям
         session = sessions.get(user_id, {})
@@ -662,6 +756,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
         return
+    
+    logger.warning(f"Неизвестный callback: {clean_data}")
 
 async def process_next_material_price(update_or_query, session):
     """Обрабатывает пошаговый ввод цен материалов"""
@@ -784,119 +880,6 @@ async def continue_to_result(update_or_query, session):
         await update_or_query.message.reply_text(result_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     else:
         await update_or_query.edit_message_text(result_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-
-# ==================== ДОПОЛНИТЕЛЬНЫЕ ОБРАБОТЧИКИ КНОПОК ====================
-async def button_handler_extended(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    
-    # Проверяем таймаут
-    if bot_lock.check_timeout():
-        sessions.pop(user_id, None)
-        await query.edit_message_text("⏰ *Сессия завершена из-за бездействия*\n\nИспользуйте /start для нового расчета", parse_mode='Markdown')
-        return
-    
-    data = query.data
-    
-    if not data.startswith(f"user_{user_id}_"):
-        await query.answer("⛔ Эта кнопка не для вас", show_alert=True)
-        return
-    
-    clean_data = data.replace(f"user_{user_id}_", "")
-    logger.info(f"Обработка extended: {clean_data} от пользователя {user_id}")
-    
-    if clean_data == "restart":
-        # Полностью новый расчет
-        bot_lock.release(user_id)
-        sessions.pop(user_id, None)
-        
-        # Создаем новое сообщение вместо редактирования
-        await query.message.reply_text("🔄 *Начинаем новый расчет...*", parse_mode='Markdown')
-        
-        # Создаем новый объект Update для передачи в start
-        message = Message(
-            message_id=0,
-            date=int(time.time()),
-            chat=query.message.chat,
-            from_user=query.from_user,
-            text="/start"
-        )
-        
-        new_update = Update(update.update_id, message=message)
-        new_update.effective_user = query.from_user
-        new_update.effective_chat = query.message.chat
-        
-        await start(new_update, context)
-        return
-    
-    if clean_data == "same_category":
-        # Новый расчет в той же категории
-        session = sessions.get(user_id)
-        if session and 'category' in session:
-            # Очищаем данные, но сохраняем категорию
-            new_session = {
-                'user_id': user_id,
-                'category': session['category'],
-                'step': 'parameters'
-            }
-            sessions[user_id] = new_session
-            keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]
-            await query.edit_message_text(
-                f"📊 *Параметры для категории {session['category']}*\n\n"
-                f"Введите через пробел:\n"
-                f"`Эффективность (%) Налог (%)`\n\n"
-                f"Пример: `150 20`",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode='Markdown'
-            )
-        else:
-            await query.answer("❌ Не удалось определить категорию", show_alert=True)
-        return
-    
-    if clean_data == "copy":
-        # Копирование результатов - просто уведомление
-        await query.answer("📋 Текст результата скопирован в буфер обмена (выделите и скопируйте вручную)", show_alert=True)
-        return
-    
-    if clean_data == "explain":
-        # Показать пояснение
-        keyboard = [[InlineKeyboardButton("🔙 Назад к результатам", callback_data=f"user_{user_id}_back_to_result")]]
-        await query.edit_message_text(
-            get_explanation_text(),
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='Markdown'
-        )
-        return
-    
-    if clean_data == "back_to_result":
-        # Вернуться к результатам
-        session = sessions.get(user_id)
-        if session and 'last_result' in session and 'last_keyboard' in session:
-            await query.edit_message_text(
-                session['last_result'],
-                reply_markup=InlineKeyboardMarkup(session['last_keyboard']),
-                parse_mode='Markdown'
-            )
-        else:
-            await query.answer("❌ Результаты не найдены", show_alert=True)
-        return
-    
-    if clean_data.startswith("materials_page_"):
-        try:
-            page = int(clean_data.replace("materials_page_", ""))
-            session = sessions.get(user_id)
-            if session:
-                await show_materials_page(query, session, edit=True, page=page)
-            else:
-                await query.answer("❌ Сессия не найдена", show_alert=True)
-        except Exception as e:
-            logger.error(f"Ошибка пагинации: {e}")
-            await query.answer("❌ Ошибка навигации", show_alert=True)
-        return
-    
-    logger.warning(f"Неизвестный callback: {clean_data}")
 
 # ==================== ОБРАБОТЧИК ТЕКСТОВЫХ СООБЩЕНИЙ ====================
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1148,8 +1131,7 @@ def main():
     app = Application.builder().token(TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(CallbackQueryHandler(button_handler_extended))
+    app.add_handler(CallbackQueryHandler(button_handler))  # Только один обработчик
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     
     logger.info("✅ Бот запущен с автоматическим режимом и финальными кнопками")
