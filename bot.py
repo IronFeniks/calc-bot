@@ -273,11 +273,11 @@ def format_materials_short(materials_list):
             zero_prices.append(f"{m['number']}. {m['name']} (нужно {format_number(m['qty'])} шт)")
     return zero_prices
 
-def format_results(product_name, category, qty, efficiency, tax_rate, materials_list, result):
+def format_results(product_name, category_path, qty, efficiency, tax_rate, materials_list, result):
     """Формирует финальный отчет"""
     text = f"📊 *РЕЗУЛЬТАТЫ РАСЧЕТА*\n\n"
     text += f"Изделие: {product_name}\n"
-    text += f"Категория: {category}\n"
+    text += f"Категория: {' > '.join(category_path)}\n"
     text += f"Количество: {qty:.0f} шт\n"
     text += f"Эффективность: {efficiency:.0f}%\n"
     text += f"Налог: {tax_rate:.0f}%\n\n"
@@ -345,6 +345,80 @@ def get_explanation_text():
 • Показывает экономику единицы товара
 """
 
+# ==================== ФУНКЦИИ ДЛЯ РАБОТЫ С КАТЕГОРИЯМИ ====================
+
+def parse_category_path(category_str):
+    """Разбирает строку категории на путь"""
+    if pd.isna(category_str) or not category_str:
+        return []
+    return [cat.strip() for cat in str(category_str).split('>')]
+
+def build_category_tree(nomenclature):
+    """Строит дерево категорий из номенклатуры"""
+    tree = {}
+    
+    for item in nomenclature:
+        category_str = item.get('Категории')
+        if pd.isna(category_str) or not category_str:
+            continue
+            
+        path = parse_category_path(category_str)
+        if not path:
+            continue
+            
+        current = tree
+        for i, cat in enumerate(path):
+            if cat not in current:
+                current[cat] = {'_subcategories': {}, '_items': []}
+            
+            # Если это последний уровень - добавляем изделие
+            if i == len(path) - 1:
+                item_type = str(item.get('Тип') or '').lower()
+                if 'изделие' in item_type or 'узел' in item_type:
+                    current[cat]['_items'].append({
+                        'code': item['Код'],
+                        'name': item['Наименование']
+                    })
+            
+            current = current[cat]['_subcategories']
+    
+    return tree
+
+def get_categories_at_level(tree, path=None):
+    """Возвращает список подкатегорий на указанном уровне"""
+    if path is None:
+        path = []
+    
+    current = tree
+    for cat in path:
+        if cat in current:
+            current = current[cat]['_subcategories']
+        else:
+            return []
+    
+    return list(current.keys())
+
+def get_items_at_level(tree, path):
+    """Возвращает список изделий на указанном уровне"""
+    current = tree
+    for cat in path:
+        if cat in current:
+            current = current[cat]['_subcategories']
+        else:
+            return []
+    
+    # Проверяем, есть ли изделия на этом уровне
+    last_cat = path[-1] if path else None
+    if last_cat and last_cat in tree:
+        # Идем по пути до последней категории
+        temp = tree
+        for cat in path:
+            if cat in temp:
+                temp = temp[cat]['_subcategories']
+        return temp['_items'] if '_items' in temp else []
+    
+    return []
+
 # ==================== ФУНКЦИИ ДЛЯ СОЗДАНИЯ КЛАВИАТУР ====================
 
 def get_back_cancel_keyboard(user_id, back_callback=None):
@@ -380,11 +454,51 @@ def get_navigation_keyboard(user_id, show_back=True, show_cancel=True, back_call
 
 # ==================== ФУНКЦИИ ДЛЯ ОТОБРАЖЕНИЯ СТРАНИЦ ====================
 
+async def show_categories_page(update_or_query, session, edit: bool = False):
+    """Показывает категории на текущем уровне"""
+    user_id = session['user_id']
+    tree = session['category_tree']
+    path = session.get('category_path', [])
+    
+    # Получаем категории на текущем уровне
+    categories = get_categories_at_level(tree, path)
+    
+    if not categories:
+        # Если нет подкатегорий, показываем изделия
+        await show_products_page(update_or_query, session, edit)
+        return
+    
+    # Формируем текст
+    if path:
+        text = f"📂 *{' > '.join(path)}*\n\nВыберите подкатегорию:"
+    else:
+        text = "📋 *Выберите категорию:*"
+    
+    # Создаем клавиатуру
+    keyboard = []
+    for cat in sorted(categories):
+        callback_data = f"user_{user_id}_cat_{cat}"
+        keyboard.append([InlineKeyboardButton(f"📁 {cat}", callback_data=callback_data)])
+    
+    # Кнопки навигации
+    nav_row = []
+    if path:
+        nav_row.append(InlineKeyboardButton("🔙 Назад", callback_data=f"user_{user_id}_back_to_categories"))
+    nav_row.append(InlineKeyboardButton("❌ Отмена", callback_data="cancel"))
+    keyboard.append(nav_row)
+    
+    if edit:
+        await update_or_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+    else:
+        await update_or_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
 async def show_products_page(update_or_query, session, edit: bool = False):
+    """Показывает список изделий в текущей категории"""
     products = session['products']
     page = session.get('product_page', 0)
     items_per_page = 20
     user_id = session.get('user_id')
+    path = session.get('category_path', [])
     
     if not user_id and hasattr(update_or_query, 'from_user'):
         user_id = update_or_query.from_user.id
@@ -393,7 +507,8 @@ async def show_products_page(update_or_query, session, edit: bool = False):
     end_idx = min(start_idx + items_per_page, len(products))
     total_pages = (len(products) - 1) // items_per_page + 1
     
-    text = f"📋 *Доступные изделия (страница {page + 1}/{total_pages}):*\n\n"
+    text = f"📋 *{' > '.join(path)}*\n\n"
+    text += f"*Доступные изделия (страница {page + 1}/{total_pages}):*\n\n"
     for i in range(start_idx, end_idx):
         text += f"{i+1}. {products[i]['name']}\n"
     text += f"\n👉 Введите номер изделия (1-{len(products)}) для выбора"
@@ -407,9 +522,9 @@ async def show_products_page(update_or_query, session, edit: bool = False):
     if nav_row:
         keyboard.append(nav_row)
     
-    # Добавляем кнопки навигации
+    # Кнопки навигации
     back_cancel_row = []
-    back_cancel_row.append(InlineKeyboardButton("🔙 Назад", callback_data=f"user_{user_id}_back_to_parameters"))
+    back_cancel_row.append(InlineKeyboardButton("🔙 Назад к категориям", callback_data=f"user_{user_id}_back_to_categories"))
     back_cancel_row.append(InlineKeyboardButton("❌ Отмена", callback_data="cancel"))
     keyboard.append(back_cancel_row)
     
@@ -422,6 +537,7 @@ async def show_materials_page(update_or_query, session, edit: bool = False, page
     """Показывает страницу с материалами и кнопками управления"""
     materials = session['materials_list']
     user_id = session.get('user_id')
+    path = session.get('category_path', [])
     
     items_per_page = 10
     total_pages = (len(materials) + items_per_page - 1) // items_per_page
@@ -435,7 +551,8 @@ async def show_materials_page(update_or_query, session, edit: bool = False, page
     start_idx = page * items_per_page
     end_idx = min(start_idx + items_per_page, len(materials))
     
-    text = f"📋 *МАТЕРИАЛЫ ДЛЯ {session['product']['Наименование']}*\n\n"
+    text = f"📋 *{' > '.join(path)}*\n\n"
+    text += f"*МАТЕРИАЛЫ ДЛЯ {session['product']['Наименование']}*\n\n"
     
     if total_pages > 1:
         text += f"*Страница {page + 1} из {total_pages}*\n\n"
@@ -524,7 +641,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     sessions.pop(user_id, None)
-    sessions[user_id] = {'step': 'categories', 'user_id': user_id}
     
     data = load_from_yandex()
     
@@ -533,30 +649,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bot_lock.release(user_id)
         return
     
-    categories = list(set(item.get('Категории', '') for item in data['nomenclature'] if item.get('Категории')))
+    # Строим дерево категорий
+    category_tree = build_category_tree(data['nomenclature'])
     
-    if not categories:
+    if not category_tree:
         await update.message.reply_text("❌ В базе нет категорий")
         bot_lock.release(user_id)
         return
     
+    sessions[user_id] = {
+        'step': 'categories',
+        'user_id': user_id,
+        'category_tree': category_tree,
+        'category_path': []
+    }
+    
     # Показываем инструкцию и категории
     await update.message.reply_text(instruction, parse_mode='Markdown')
-    
-    categories_str = [str(cat) for cat in categories]
-    keyboard = []
-    for cat in sorted(categories_str):
-        callback_data = f"user_{user_id}_cat_{cat}"
-        keyboard.append([InlineKeyboardButton(cat, callback_data=callback_data)])
-    
-    # Для первого сообщения только кнопка отмены
-    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
-    
-    await update.message.reply_text(
-        "📋 *Выберите категорию:*",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
+    await show_categories_page(update, sessions[user_id], edit=False)
 
 # ==================== ОБРАБОТЧИК КНОПОК (ОБЪЕДИНЕННЫЙ) ====================
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -617,17 +727,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if clean_data == "same_category":
         # Новый расчет в той же категории
         session = sessions.get(user_id)
-        if session and 'category' in session:
-            # Очищаем данные, но сохраняем категорию
+        if session and 'category_path' in session:
+            # Очищаем данные, но сохраняем путь категории
             new_session = {
                 'user_id': user_id,
-                'category': session['category'],
+                'category_tree': session['category_tree'],
+                'category_path': session['category_path'].copy(),
                 'step': 'parameters'
             }
             sessions[user_id] = new_session
+            path_str = ' > '.join(session['category_path'])
             keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_categories")
             await query.edit_message_text(
-                f"📊 *Параметры для категории {session['category']}*\n\n"
+                f"📊 *Параметры для категории {path_str}*\n\n"
                 f"Введите через пробел:\n"
                 f"`Эффективность (%) Налог (%)`\n\n"
                 f"Пример: `150 20`",
@@ -669,33 +781,31 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ==================== КНОПКИ НАВИГАЦИИ ====================
     if clean_data == "back_to_categories":
         # Возврат к категориям
-        session = sessions.get(user_id, {})
-        sessions.pop(user_id, None)
-        data = load_from_yandex()
-        categories = list(set(item.get('Категории', '') for item in data['nomenclature'] if item.get('Категории')))
-        categories_str = [str(cat) for cat in categories]
-        
-        keyboard = []
-        for cat in sorted(categories_str):
-            callback_data = f"user_{user_id}_cat_{cat}"
-            keyboard.append([InlineKeyboardButton(cat, callback_data=callback_data)])
-        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
-        
-        await query.edit_message_text(
-            "📋 *Выберите категорию:*",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='Markdown'
-        )
+        session = sessions.get(user_id)
+        if session:
+            if session.get('category_path'):
+                # Убираем последнюю категорию из пути
+                session['category_path'].pop()
+            
+            if session.get('category_path'):
+                # Если еще есть категории, показываем их
+                session['step'] = 'categories'
+                await show_categories_page(query, session, edit=True)
+            else:
+                # Если вернулись к корню, показываем корневые категории
+                session['step'] = 'categories'
+                await show_categories_page(query, session, edit=True)
         return
     
     if clean_data == "back_to_parameters":
         # Возврат к вводу параметров
         session = sessions.get(user_id)
-        if session and 'category' in session:
+        if session and 'category_path' in session:
             session['step'] = 'parameters'
+            path_str = ' > '.join(session['category_path'])
             keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_categories")
             await query.edit_message_text(
-                f"📊 *Параметры для категории {session['category']}*\n\n"
+                f"📊 *Параметры для категории {path_str}*\n\n"
                 f"Введите через пробел:\n"
                 f"`Эффективность (%) Налог (%)`\n\n"
                 f"Пример: `150 20`",
@@ -835,16 +945,45 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if clean_data.startswith("cat_"):
         category = clean_data[4:]
-        sessions[user_id] = {'step': 'parameters', 'category': category, 'user_id': user_id}
-        keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_categories")
-        await query.edit_message_text(
-            f"📊 *Параметры для категории {category}*\n\n"
-            f"Введите через пробел:\n"
-            f"`Эффективность (%) Налог (%)`\n\n"
-            f"Пример: `150 20`",
-            reply_markup=keyboard,
-            parse_mode='Markdown'
-        )
+        session = sessions.get(user_id)
+        
+        if session:
+            # Добавляем категорию в путь
+            if 'category_path' not in session:
+                session['category_path'] = []
+            session['category_path'].append(category)
+            
+            # Проверяем, есть ли подкатегории на этом уровне
+            next_categories = get_categories_at_level(session['category_tree'], session['category_path'])
+            
+            if next_categories:
+                # Есть подкатегории - показываем их
+                session['step'] = 'categories'
+                await show_categories_page(query, session, edit=True)
+            else:
+                # Нет подкатегорий - показываем изделия
+                products = get_items_at_level(session['category_tree'], session['category_path'])
+                
+                if products:
+                    session.update({
+                        'step': 'parameters',
+                        'products': products,
+                        'product_page': 0
+                    })
+                    
+                    # Запрашиваем параметры
+                    path_str = ' > '.join(session['category_path'])
+                    keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_categories")
+                    await query.edit_message_text(
+                        f"📊 *Параметры для категории {path_str}*\n\n"
+                        f"Введите через пробел:\n"
+                        f"`Эффективность (%) Налог (%)`\n\n"
+                        f"Пример: `150 20`",
+                        reply_markup=keyboard,
+                        parse_mode='Markdown'
+                    )
+                else:
+                    await query.answer("❌ В этой категории нет изделий", show_alert=True)
         return
     
     logger.warning(f"Неизвестный callback: {clean_data}")
@@ -966,7 +1105,7 @@ async def continue_to_result(update_or_query, session):
     # Формируем результат
     result_text = format_results(
         session['product']['Наименование'],
-        session['category'],
+        session['category_path'],
         session['qty'],
         session['efficiency'],
         session['tax'],
@@ -1054,26 +1193,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'tax': tax
         })
         
-        data = load_from_yandex()
-        products = []
-        for item in data['nomenclature']:
-            category = item.get('Категории')
-            item_type = str(item.get('Тип') or '').lower()
-            if category == session['category'] and ('изделие' in item_type or 'узел' in item_type):
-                products.append({'code': item['Код'], 'name': item['Наименование']})
-        
-        if not products:
-            keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_categories")
-            await update.message.reply_text(
-                "❌ Нет изделий в этой категории",
-                reply_markup=keyboard
-            )
-            return
-        
-        session.update({
-            'products': products,
-            'product_page': 0
-        })
         await show_products_page(update, session, edit=False)
         return
     
@@ -1311,7 +1430,8 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     
-    logger.info("✅ Бот запущен с кнопками навигации Назад/Отмена")
+    logger.info("✅ Бот запущен с поддержкой подкатегорий и кнопками навигации")
     app.run_polling()
+
 if __name__ == "__main__":
     main()
