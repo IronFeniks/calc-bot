@@ -209,18 +209,23 @@ async def check_access(update: Update) -> bool:
         topic_id = update.callback_query.message.message_thread_id
         logger.info(f"Из callback: thread_id={topic_id}")
     
-    # Если это наше искусственное сообщение из restart_bot
-    elif hasattr(update, '_message_thread_id'):
-        topic_id = update._message_thread_id
-        logger.info(f"Из искусственного сообщения: thread_id={topic_id}")
-    
     logger.info(f"Проверка доступа: chat={chat_id}, topic={topic_id}, required_topic={TOPIC_ID}")
     
-    if chat_id == GROUP_ID and topic_id == TOPIC_ID:
-        return True
+    # Для группы с топиками проверяем совпадение
+    if chat_id == GROUP_ID:
+        # Если топик не указан (None), значит сообщение в общем чате, а не в топике
+        if topic_id is None:
+            logger.warning(f"Сообщение в общем чате, а не в топике")
+            return False
+        # Проверяем совпадение с требуемым топиком
+        if topic_id == TOPIC_ID:
+            return True
+        else:
+            logger.warning(f"Неверный топик: {topic_id}, требуется: {TOPIC_ID}")
+            return False
     
-    logger.warning(f"Доступ запрещен: chat={chat_id}, topic={topic_id}")
-    return False
+    # Если это не группа или группа без ограничений
+    return True
 
 # ==================== СБОР МАТЕРИАЛОВ ====================
 def collect_materials(product_code, multiplier, nomenclature, specifications):
@@ -1060,10 +1065,7 @@ async def restart_bot(query, context: ContextTypes.DEFAULT_TYPE):
     # Создаем новый update
     new_update = Update(update_id=0, message=message)
     
-    # Добавляем thread_id как атрибут для проверки доступа
-    new_update._message_thread_id = thread_id
-    
-    # Вызываем start
+    # Вызываем start - thread_id уже содержится в message.message_thread_id
     await start(new_update, context)
 
 async def process_next_material_price(update_or_query, session):
