@@ -149,7 +149,7 @@ cached_data = None
 last_update = 0
 sessions = {}
 
-# ==================== ЗАГРУЗКА С GOOGLE ДИСКА ====================
+# ==================== ЗАГРУЗКА С YANDEX ДИСКА ====================
 def load_from_yandex():
     global cached_data, last_update
     
@@ -348,10 +348,11 @@ def get_explanation_text():
 # ==================== ФУНКЦИИ ДЛЯ РАБОТЫ С КАТЕГОРИЯМИ ====================
 
 def parse_category_path(category_str):
-    """Разбирает строку категории на путь"""
+    """Разбирает строку категории на путь, учитывая пробелы вокруг >"""
     if pd.isna(category_str) or not category_str:
         return []
-    return [cat.strip() for cat in str(category_str).split('>')]
+    # Разделяем по " > " и удаляем лишние пробелы
+    return [cat.strip() for cat in str(category_str).split(' > ')]
 
 def build_category_tree(nomenclature):
     """Строит дерево категорий из номенклатуры"""
@@ -366,21 +367,38 @@ def build_category_tree(nomenclature):
         if not path:
             continue
             
+        logger.info(f"Обработка пути: {path} для изделия {item.get('Наименование')}")
+        
         current = tree
+        # Проходим по всем уровням пути
         for i, cat in enumerate(path):
             if cat not in current:
                 current[cat] = {'_subcategories': {}, '_items': []}
+                logger.info(f"  Добавлена категория: {cat}")
             
             # Если это последний уровень - добавляем изделие
             if i == len(path) - 1:
                 item_type = str(item.get('Тип') or '').lower()
                 if 'изделие' in item_type or 'узел' in item_type:
-                    current[cat]['_items'].append({
-                        'code': item['Код'],
-                        'name': item['Наименование']
-                    })
+                    # Проверяем, нет ли уже такого изделия
+                    exists = False
+                    for existing in current[cat]['_items']:
+                        if existing['code'] == item['Код']:
+                            exists = True
+                            break
+                    if not exists:
+                        current[cat]['_items'].append({
+                            'code': item['Код'],
+                            'name': item['Наименование']
+                        })
+                        logger.info(f"  Добавлено изделие {item['Наименование']} в категорию {cat}")
             
             current = current[cat]['_subcategories']
+    
+    # Логируем итоговую структуру
+    logger.info("Итоговая структура дерева:")
+    for cat, content in tree.items():
+        logger.info(f"  {cat}: подкатегории={list(content['_subcategories'].keys())}, изделий={len(content['_items'])}")
     
     return tree
 
@@ -400,24 +418,34 @@ def get_categories_at_level(tree, path=None):
 
 def get_items_at_level(tree, path):
     """Возвращает список изделий на указанном уровне"""
+    if not path:
+        return []
+    
     current = tree
+    # Проходим по всему пути
     for cat in path:
         if cat in current:
             current = current[cat]['_subcategories']
         else:
+            logger.warning(f"Категория {cat} не найдена в пути {path}")
             return []
     
-    # Проверяем, есть ли изделия на этом уровне
-    last_cat = path[-1] if path else None
-    if last_cat and last_cat in tree:
-        # Идем по пути до последней категории
-        temp = tree
-        for cat in path:
-            if cat in temp:
-                temp = temp[cat]['_subcategories']
-        return temp['_items'] if '_items' in temp else []
+    # Возвращаем изделия с этого уровня
+    items = []
     
-    return []
+    # Проверяем, есть ли изделия в текущей категории
+    last_cat = path[-1]
+    temp = tree
+    for cat in path:
+        if cat in temp:
+            if cat == last_cat:
+                # Это последняя категория - берем ее изделия
+                if '_items' in temp[cat]:
+                    items = temp[cat]['_items']
+                    logger.info(f"Найдено изделий в {last_cat}: {len(items)}")
+            temp = temp[cat]['_subcategories']
+    
+    return items
 
 # ==================== ФУНКЦИИ ДЛЯ СОЗДАНИЯ КЛАВИАТУР ====================
 
@@ -460,12 +488,27 @@ async def show_categories_page(update_or_query, session, edit: bool = False):
     tree = session['category_tree']
     path = session.get('category_path', [])
     
+    logger.info(f"Показ категорий: путь={path}")
+    
     # Получаем категории на текущем уровне
     categories = get_categories_at_level(tree, path)
+    logger.info(f"Найденные категории: {categories}")
     
     if not categories:
-        # Если нет подкатегорий, показываем изделия
-        await show_products_page(update_or_query, session, edit)
+        # Если нет подкатегорий, проверяем есть ли изделия
+        products = get_items_at_level(tree, path)
+        if products:
+            # Если есть изделия, показываем их
+            session['products'] = products
+            session['product_page'] = 0
+            await show_products_page(update_or_query, session, edit)
+        else:
+            # Если ничего нет
+            text = "❌ В этой категории нет элементов"
+            if edit:
+                await update_or_query.message.edit_text(text)
+            else:
+                await update_or_query.message.reply_text(text)
         return
     
     # Формируем текст
@@ -649,6 +692,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bot_lock.release(user_id)
         return
     
+    # Выводим пример первых нескольких записей для отладки
+    logger.info("Пример первых записей номенклатуры:")
+    for i, item in enumerate(data['nomenclature'][:5]):
+        cat = item.get('Категории', '')
+        logger.info(f"  Запись {i+1}: Категории='{cat}', Наименование='{item.get('Наименование')}', Тип='{item.get('Тип')}'")
+    
     # Строим дерево категорий
     category_tree = build_category_tree(data['nomenclature'])
     
@@ -786,15 +835,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if session.get('category_path'):
                 # Убираем последнюю категорию из пути
                 session['category_path'].pop()
+                logger.info(f"Возврат к категориям, новый путь: {session['category_path']}")
             
-            if session.get('category_path'):
-                # Если еще есть категории, показываем их
-                session['step'] = 'categories'
-                await show_categories_page(query, session, edit=True)
-            else:
-                # Если вернулись к корню, показываем корневые категории
-                session['step'] = 'categories'
-                await show_categories_page(query, session, edit=True)
+            session['step'] = 'categories'
+            await show_categories_page(query, session, edit=True)
         return
     
     if clean_data == "back_to_parameters":
@@ -951,39 +995,49 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Добавляем категорию в путь
             if 'category_path' not in session:
                 session['category_path'] = []
+            
+            # Добавляем выбранную категорию
             session['category_path'].append(category)
+            logger.info(f"Текущий путь: {session['category_path']}")
             
             # Проверяем, есть ли подкатегории на этом уровне
             next_categories = get_categories_at_level(session['category_tree'], session['category_path'])
+            logger.info(f"Найдены подкатегории: {next_categories}")
+            
+            # Проверяем, есть ли изделия на этом уровне
+            products = get_items_at_level(session['category_tree'], session['category_path'])
+            logger.info(f"Найдены изделия: {len(products) if products else 0}")
             
             if next_categories:
                 # Есть подкатегории - показываем их
+                logger.info(f"Показываем подкатегории: {next_categories}")
                 session['step'] = 'categories'
                 await show_categories_page(query, session, edit=True)
-            else:
-                # Нет подкатегорий - показываем изделия
-                products = get_items_at_level(session['category_tree'], session['category_path'])
+            elif products:
+                # Нет подкатегорий, но есть изделия - переходим к параметрам
+                logger.info(f"Показываем изделия: {len(products)}")
+                session.update({
+                    'step': 'parameters',
+                    'products': products,
+                    'product_page': 0
+                })
                 
-                if products:
-                    session.update({
-                        'step': 'parameters',
-                        'products': products,
-                        'product_page': 0
-                    })
-                    
-                    # Запрашиваем параметры
-                    path_str = ' > '.join(session['category_path'])
-                    keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_categories")
-                    await query.edit_message_text(
-                        f"📊 *Параметры для категории {path_str}*\n\n"
-                        f"Введите через пробел:\n"
-                        f"`Эффективность (%) Налог (%)`\n\n"
-                        f"Пример: `150 20`",
-                        reply_markup=keyboard,
-                        parse_mode='Markdown'
-                    )
-                else:
-                    await query.answer("❌ В этой категории нет изделий", show_alert=True)
+                # Запрашиваем параметры
+                path_str = ' > '.join(session['category_path'])
+                keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_categories")
+                await query.edit_message_text(
+                    f"📊 *Параметры для категории {path_str}*\n\n"
+                    f"Введите через пробел:\n"
+                    f"`Эффективность (%) Налог (%)`\n\n"
+                    f"Пример: `150 20`",
+                    reply_markup=keyboard,
+                    parse_mode='Markdown'
+                )
+            else:
+                # Нет ни подкатегорий, ни изделий
+                await query.answer("❌ В этой категории нет изделий или подкатегорий", show_alert=True)
+                # Убираем последнюю добавленную категорию из пути
+                session['category_path'].pop()
         return
     
     logger.warning(f"Неизвестный callback: {clean_data}")
