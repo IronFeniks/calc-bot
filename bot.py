@@ -766,18 +766,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # ==================== ФИНАЛЬНЫЕ КНОПКИ ====================
-    if clean_data == "restart":
-        # Полностью новый расчет
-        bot_lock.release(user_id)
-        sessions.pop(user_id, None)
-        
-        # Создаем новое сообщение
-        await query.message.reply_text("🔄 *Начинаем новый расчет...*", parse_mode='Markdown')
-        
-        # Вызываем start через создание нового update
-        await restart_bot(query, context)
-        return
-    
     if clean_data == "same_category":
         # Новый расчет в той же категории
         session = sessions.get(user_id)
@@ -802,11 +790,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await query.answer("❌ Не удалось определить категорию", show_alert=True)
-        return
-    
-    if clean_data == "copy":
-        # Копирование результатов - просто уведомление
-        await query.answer("📋 Текст результата можно скопировать выделением", show_alert=True)
         return
     
     if clean_data == "explain":
@@ -1047,27 +1030,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     logger.warning(f"Неизвестный callback: {clean_data}")
 
-async def restart_bot(query, context: ContextTypes.DEFAULT_TYPE):
-    """Вспомогательная функция для перезапуска бота"""
-    thread_id = query.message.message_thread_id
-    logger.info(f"Перезапуск бота с thread_id={thread_id}")
-    
-    # Создаем искусственное сообщение с правильным thread_id
-    message = Message(
-        message_id=query.message.message_id,
-        date=query.message.date,
-        chat=query.message.chat,
-        from_user=query.from_user,
-        text="/start",
-        message_thread_id=thread_id
-    )
-    
-    # Создаем новый update
-    new_update = Update(update_id=0, message=message)
-    
-    # Вызываем start - thread_id уже содержится в message.message_thread_id
-    await start(new_update, context)
-
 async def process_next_material_price(update_or_query, session):
     """Обрабатывает пошаговый ввод цен материалов"""
     user_id = session['user_id']
@@ -1169,15 +1131,14 @@ async def continue_to_result(update_or_query, session):
         result
     )
     
-    # Кнопки для финального результата
+    # Кнопки для финального результата (только "Та же категория" и "Пояснить")
     keyboard = [
         [
-            InlineKeyboardButton("🔄 Новый расчет", callback_data=f"user_{user_id}_restart"),
-            InlineKeyboardButton("📂 Та же категория", callback_data=f"user_{user_id}_same_category")
+            InlineKeyboardButton("📂 Та же категория", callback_data=f"user_{user_id}_same_category"),
+            InlineKeyboardButton("📖 Пояснить", callback_data=f"user_{user_id}_explain")
         ],
         [
-            InlineKeyboardButton("📋 Копировать", callback_data=f"user_{user_id}_copy"),
-            InlineKeyboardButton("📖 Пояснить по цифрам", callback_data=f"user_{user_id}_explain")
+            InlineKeyboardButton("❌ Завершить", callback_data="cancel")
         ]
     ]
     
