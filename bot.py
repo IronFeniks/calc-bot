@@ -195,7 +195,26 @@ async def check_access(update: Update) -> bool:
         return True
     
     chat_id = update.effective_chat.id
-    topic_id = update.message.message_thread_id if update.message else None
+    
+    # Проверяем различные источники thread_id
+    topic_id = None
+    
+    # Если есть сообщение
+    if update.message:
+        topic_id = update.message.message_thread_id
+        logger.info(f"Из сообщения: thread_id={topic_id}")
+    
+    # Если есть callback query
+    elif update.callback_query and update.callback_query.message:
+        topic_id = update.callback_query.message.message_thread_id
+        logger.info(f"Из callback: thread_id={topic_id}")
+    
+    # Если это наше искусственное сообщение из restart_bot
+    elif hasattr(update, '_message_thread_id'):
+        topic_id = update._message_thread_id
+        logger.info(f"Из искусственного сообщения: thread_id={topic_id}")
+    
+    logger.info(f"Проверка доступа: chat={chat_id}, topic={topic_id}, required_topic={TOPIC_ID}")
     
     if chat_id == GROUP_ID and topic_id == TOPIC_ID:
         return True
@@ -326,6 +345,39 @@ def get_explanation_text():
 • Показывает экономику единицы товара
 """
 
+# ==================== ФУНКЦИИ ДЛЯ СОЗДАНИЯ КЛАВИАТУР ====================
+
+def get_back_cancel_keyboard(user_id, back_callback=None):
+    """Создает клавиатуру с кнопками Назад и Отмена"""
+    keyboard = []
+    row = []
+    
+    if back_callback:
+        row.append(InlineKeyboardButton("🔙 Назад", callback_data=f"user_{user_id}_{back_callback}"))
+    
+    row.append(InlineKeyboardButton("❌ Отмена", callback_data="cancel"))
+    
+    if row:
+        keyboard.append(row)
+    
+    return InlineKeyboardMarkup(keyboard) if keyboard else None
+
+def get_navigation_keyboard(user_id, show_back=True, show_cancel=True, back_callback=None):
+    """Создает клавиатуру с навигационными кнопками"""
+    keyboard = []
+    nav_row = []
+    
+    if show_back and back_callback:
+        nav_row.append(InlineKeyboardButton("🔙 Назад", callback_data=f"user_{user_id}_{back_callback}"))
+    
+    if show_cancel:
+        nav_row.append(InlineKeyboardButton("❌ Отмена", callback_data="cancel"))
+    
+    if nav_row:
+        keyboard.append(nav_row)
+    
+    return InlineKeyboardMarkup(keyboard) if keyboard else None
+
 # ==================== ФУНКЦИИ ДЛЯ ОТОБРАЖЕНИЯ СТРАНИЦ ====================
 
 async def show_products_page(update_or_query, session, edit: bool = False):
@@ -355,7 +407,11 @@ async def show_products_page(update_or_query, session, edit: bool = False):
     if nav_row:
         keyboard.append(nav_row)
     
-    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
+    # Добавляем кнопки навигации
+    back_cancel_row = []
+    back_cancel_row.append(InlineKeyboardButton("🔙 Назад", callback_data=f"user_{user_id}_back_to_parameters"))
+    back_cancel_row.append(InlineKeyboardButton("❌ Отмена", callback_data="cancel"))
+    keyboard.append(back_cancel_row)
     
     if edit:
         await update_or_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -392,7 +448,7 @@ async def show_materials_page(update_or_query, session, edit: bool = False, page
     # Создаем клавиатуру
     keyboard = []
     
-    # Кнопки навигации, если материалов больше 15 и больше одной страницы
+    # Кнопки навигации по страницам
     if len(materials) > 15 and total_pages > 1:
         nav_row = []
         if page > 0:
@@ -403,10 +459,14 @@ async def show_materials_page(update_or_query, session, edit: bool = False, page
             keyboard.append(nav_row)
     
     # Основные кнопки действий
-    keyboard.append([InlineKeyboardButton("🔙 Назад к выбору изделия", callback_data=f"user_{user_id}_back_to_products")])
     keyboard.append([InlineKeyboardButton("✏️ Ввод цен", callback_data=f"user_{user_id}_price_input")])
     keyboard.append([InlineKeyboardButton("🤖 Автоматически", callback_data=f"user_{user_id}_auto_prices")])
-    keyboard.append([InlineKeyboardButton("❌ Отменить", callback_data="cancel")])
+    
+    # Кнопки навигации
+    nav_row = []
+    nav_row.append(InlineKeyboardButton("🔙 Назад к выбору изделия", callback_data=f"user_{user_id}_back_to_products"))
+    nav_row.append(InlineKeyboardButton("❌ Отмена", callback_data="cancel"))
+    keyboard.append(nav_row)
     
     if edit:
         await update_or_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -489,6 +549,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         callback_data = f"user_{user_id}_cat_{cat}"
         keyboard.append([InlineKeyboardButton(cat, callback_data=callback_data)])
     
+    # Для первого сообщения только кнопка отмены
     keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
     
     await update.message.reply_text(
@@ -564,13 +625,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'step': 'parameters'
             }
             sessions[user_id] = new_session
-            keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]
+            keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_categories")
             await query.edit_message_text(
                 f"📊 *Параметры для категории {session['category']}*\n\n"
                 f"Введите через пробел:\n"
                 f"`Эффективность (%) Налог (%)`\n\n"
                 f"Пример: `150 20`",
-                reply_markup=InlineKeyboardMarkup(keyboard),
+                reply_markup=keyboard,
                 parse_mode='Markdown'
             )
         else:
@@ -605,21 +666,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("❌ Результаты не найдены", show_alert=True)
         return
     
-    # ==================== НАВИГАЦИЯ ПО МАТЕРИАЛАМ ====================
-    if clean_data.startswith("materials_page_"):
-        try:
-            page = int(clean_data.replace("materials_page_", ""))
-            session = sessions.get(user_id)
-            if session:
-                await show_materials_page(query, session, edit=True, page=page)
-            else:
-                await query.answer("❌ Сессия не найдена", show_alert=True)
-        except Exception as e:
-            logger.error(f"Ошибка пагинации: {e}")
-            await query.answer("❌ Ошибка навигации", show_alert=True)
-        return
-    
-    # ==================== ОСНОВНЫЕ КНОПКИ ====================
+    # ==================== КНОПКИ НАВИГАЦИИ ====================
     if clean_data == "back_to_categories":
         # Возврат к категориям
         session = sessions.get(user_id, {})
@@ -641,6 +688,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
+    if clean_data == "back_to_parameters":
+        # Возврат к вводу параметров
+        session = sessions.get(user_id)
+        if session and 'category' in session:
+            session['step'] = 'parameters'
+            keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_categories")
+            await query.edit_message_text(
+                f"📊 *Параметры для категории {session['category']}*\n\n"
+                f"Введите через пробел:\n"
+                f"`Эффективность (%) Налог (%)`\n\n"
+                f"Пример: `150 20`",
+                reply_markup=keyboard,
+                parse_mode='Markdown'
+            )
+        return
+    
     if clean_data == "back_to_products":
         # Возврат к выбору изделия
         session = sessions.get(user_id)
@@ -650,6 +713,45 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_products_page(query, session, edit=True)
         return
     
+    if clean_data == "back_to_prices":
+        # Возврат к вводу цен
+        session = sessions.get(user_id)
+        if session:
+            session['step'] = 'prices'
+            saved_price = get_drawing_price(session['product']['Код'])
+            price_text = f"✅ Выбрано: *{session['product']['Наименование']}*\nКратность: {session['output_per_drawing']}\n\n"
+            price_text += f"💰 Введите через пробел:\n`Рыночная цена Стоимость чертежа`\n\n"
+            if saved_price > 0:
+                price_text += f"*(сохранённая стоимость чертежа: {format_number(saved_price)} ISK)*\n"
+            price_text += f"Пример: `3200000 6900000`"
+            
+            keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_products")
+            await query.edit_message_text(price_text, parse_mode='Markdown', reply_markup=keyboard)
+        return
+    
+    if clean_data == "back_to_materials":
+        # Возврат к списку материалов
+        session = sessions.get(user_id)
+        if session:
+            session['step'] = 'materials'
+            await show_materials_page(query, session, edit=True, page=session.get('materials_page', 0))
+        return
+    
+    # ==================== НАВИГАЦИЯ ПО МАТЕРИАЛАМ ====================
+    if clean_data.startswith("materials_page_"):
+        try:
+            page = int(clean_data.replace("materials_page_", ""))
+            session = sessions.get(user_id)
+            if session:
+                await show_materials_page(query, session, edit=True, page=page)
+            else:
+                await query.answer("❌ Сессия не найдена", show_alert=True)
+        except Exception as e:
+            logger.error(f"Ошибка пагинации: {e}")
+            await query.answer("❌ Ошибка навигации", show_alert=True)
+        return
+    
+    # ==================== ОСНОВНЫЕ КНОПКИ ====================
     if clean_data == "price_input":
         # Начинаем пошаговый ввод цен
         session = sessions.get(user_id)
@@ -734,13 +836,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if clean_data.startswith("cat_"):
         category = clean_data[4:]
         sessions[user_id] = {'step': 'parameters', 'category': category, 'user_id': user_id}
-        keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]
+        keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_categories")
         await query.edit_message_text(
             f"📊 *Параметры для категории {category}*\n\n"
             f"Введите через пробел:\n"
             f"`Эффективность (%) Налог (%)`\n\n"
             f"Пример: `150 20`",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=keyboard,
             parse_mode='Markdown'
         )
         return
@@ -749,17 +851,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def restart_bot(query, context: ContextTypes.DEFAULT_TYPE):
     """Вспомогательная функция для перезапуска бота"""
-    # Создаем искусственное сообщение
+    thread_id = query.message.message_thread_id
+    logger.info(f"Перезапуск бота с thread_id={thread_id}")
+    
+    # Создаем искусственное сообщение с правильным thread_id
     message = Message(
         message_id=query.message.message_id,
         date=query.message.date,
         chat=query.message.chat,
         from_user=query.from_user,
-        text="/start"
+        text="/start",
+        message_thread_id=thread_id
     )
     
     # Создаем новый update
     new_update = Update(update_id=0, message=message)
+    
+    # Добавляем thread_id как атрибут для проверки доступа
+    new_update._message_thread_id = thread_id
     
     # Вызываем start
     await start(new_update, context)
@@ -785,12 +894,12 @@ async def process_next_material_price(update_or_query, session):
     text += f"Текущая цена в базе: {format_number(current_price)} ISK\n\n"
     text += f"Введите цену для {m['name']} (или 0 если цена не нужна):"
     
-    keyboard = [[InlineKeyboardButton("❌ Отменить", callback_data="cancel")]]
+    keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_materials")
     
     if hasattr(update_or_query, 'message'):
-        await update_or_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        await update_or_query.message.reply_text(text, reply_markup=keyboard, parse_mode='Markdown')
     else:
-        await update_or_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        await update_or_query.edit_message_text(text, reply_markup=keyboard, parse_mode='Markdown')
     
     session['step'] = 'price_input_waiting'
 
@@ -813,12 +922,12 @@ async def process_next_missing_price(update_or_query, session):
     text += f"Необходимое количество: {format_number(material['qty'])} шт\n\n"
     text += f"Введите цену для {material['name']}:"
     
-    keyboard = [[InlineKeyboardButton("❌ Отменить", callback_data="cancel")]]
+    keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_materials")
     
     if hasattr(update_or_query, 'message'):
-        await update_or_query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        await update_or_query.message.reply_text(text, reply_markup=keyboard, parse_mode='Markdown')
     else:
-        await update_or_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        await update_or_query.edit_message_text(text, reply_markup=keyboard, parse_mode='Markdown')
     
     session['step'] = 'price_input_missing_waiting'
 
@@ -885,6 +994,7 @@ async def continue_to_result(update_or_query, session):
         await update_or_query.message.reply_text(result_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
     else:
         await update_or_query.edit_message_text(result_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
 # ==================== ОБРАБОТЧИК ТЕКСТОВЫХ СООБЩЕНИЙ ====================
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_access(update):
@@ -920,14 +1030,22 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if session['step'] == 'parameters':
         parts = text.split()
         if len(parts) < 2:
-            await update.message.reply_text("❌ Введите через пробел: Эффективность Налог\nПример: 150 20")
+            keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_categories")
+            await update.message.reply_text(
+                "❌ Введите через пробел: Эффективность Налог\nПример: 150 20",
+                reply_markup=keyboard
+            )
             return
         
         try:
             efficiency = float(parts[0].replace(',', '.'))
             tax = float(parts[1].replace(',', '.'))
         except ValueError:
-            await update.message.reply_text("❌ Введите числа")
+            keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_categories")
+            await update.message.reply_text(
+                "❌ Введите числа",
+                reply_markup=keyboard
+            )
             return
         
         session.update({
@@ -945,7 +1063,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 products.append({'code': item['Код'], 'name': item['Наименование']})
         
         if not products:
-            await update.message.reply_text("❌ Нет изделий в этой категории")
+            keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_categories")
+            await update.message.reply_text(
+                "❌ Нет изделий в этой категории",
+                reply_markup=keyboard
+            )
             return
         
         session.update({
@@ -963,7 +1085,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 raise ValueError
             selected = session['products'][idx]
         except:
-            await update.message.reply_text(f"❌ Введите число от 1 до {len(session['products'])}")
+            keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_parameters")
+            await update.message.reply_text(
+                f"❌ Введите число от 1 до {len(session['products'])}",
+                reply_markup=keyboard
+            )
             return
         
         data = load_from_yandex()
@@ -974,7 +1100,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 break
         
         if not product:
-            await update.message.reply_text("❌ Ошибка получения данных")
+            keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_parameters")
+            await update.message.reply_text(
+                "❌ Ошибка получения данных",
+                reply_markup=keyboard
+            )
             return
         
         # Получаем кратность
@@ -1000,21 +1130,30 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             price_text += f"*(сохранённая стоимость чертежа: {format_number(saved_price)} ISK)*\n"
         price_text += f"Пример: `3200000 6900000`"
         
-        await update.message.reply_text(price_text, parse_mode='Markdown')
+        keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_parameters")
+        await update.message.reply_text(price_text, parse_mode='Markdown', reply_markup=keyboard)
         return
     
     # Обработка ввода цен
     elif session['step'] == 'prices':
         parts = text.split()
         if len(parts) < 2:
-            await update.message.reply_text("❌ Введите две цены через пробел\nПример: 3200000 6900000")
+            keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_products")
+            await update.message.reply_text(
+                "❌ Введите две цены через пробел\nПример: 3200000 6900000",
+                reply_markup=keyboard
+            )
             return
         
         try:
             market_price = float(parts[0].replace(',', '.'))
             drawing_price = float(parts[1].replace(',', '.'))
         except ValueError:
-            await update.message.reply_text("❌ Введите числа")
+            keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_products")
+            await update.message.reply_text(
+                "❌ Введите числа",
+                reply_markup=keyboard
+            )
             return
         
         save_drawing_price(session['product']['Код'], drawing_price)
@@ -1023,7 +1162,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'drawing_price': drawing_price,
             'step': 'quantity'
         })
-        await update.message.reply_text("📦 Введите количество продукции (шт):")
+        
+        keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_products")
+        await update.message.reply_text(
+            "📦 Введите количество продукции (шт):",
+            reply_markup=keyboard
+        )
         return
     
     # Обработка ввода количества
@@ -1031,14 +1175,22 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             qty = float(text.replace(',', '.'))
         except ValueError:
-            await update.message.reply_text("❌ Введите число")
+            keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_prices")
+            await update.message.reply_text(
+                "❌ Введите число",
+                reply_markup=keyboard
+            )
             return
         
         product = session['product']
         output = session['output_per_drawing']
         
         if qty % output != 0:
-            await update.message.reply_text(f"⚠️ Количество должно быть кратно {output}")
+            keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_prices")
+            await update.message.reply_text(
+                f"⚠️ Количество должно быть кратно {output}",
+                reply_markup=keyboard
+            )
             return
         
         drawings_needed = int(qty // output)
@@ -1051,7 +1203,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         if not materials_dict:
-            await update.message.reply_text("❌ Нет материалов для этого изделия")
+            keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_prices")
+            await update.message.reply_text(
+                "❌ Нет материалов для этого изделия",
+                reply_markup=keyboard
+            )
             return
         
         # Формируем список материалов
@@ -1090,7 +1246,15 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             price = float(text.replace(',', '.'))
         except ValueError:
-            await update.message.reply_text("❌ Введите число")
+            current = session.get('current_material', 0)
+            materials = session['materials_list']
+            m = materials[current]
+            
+            keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_materials")
+            await update.message.reply_text(
+                f"❌ Введите число для {m['name']}",
+                reply_markup=keyboard
+            )
             return
         
         current = session.get('current_material', 0)
@@ -1110,7 +1274,16 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             price = float(text.replace(',', '.'))
         except ValueError:
-            await update.message.reply_text("❌ Введите число")
+            current = session.get('current_missing_index', 0)
+            missing_materials = session.get('missing_materials', [])
+            missing = missing_materials[current]
+            material = session['materials_list'][missing['index']]
+            
+            keyboard = get_back_cancel_keyboard(user_id, back_callback="back_to_materials")
+            await update.message.reply_text(
+                f"❌ Введите число для {material['name']}",
+                reply_markup=keyboard
+            )
             return
         
         current = session.get('current_missing_index', 0)
@@ -1138,8 +1311,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     
-    logger.info("✅ Бот запущен с автоматическим режимом и финальными кнопками")
+    logger.info("✅ Бот запущен с кнопками навигации Назад/Отмена")
     app.run_polling()
-
 if __name__ == "__main__":
     main()
